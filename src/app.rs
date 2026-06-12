@@ -23,6 +23,23 @@ pub fn url_decode(s: &str) -> String {
     String::from_utf8_lossy(&buf).into_owned()
 }
 
+fn walk_dir(dir: &Path) -> Vec<walkdir::DirEntry> {
+    WalkDir::new(dir)
+        .max_depth(1)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(|e| {
+            if e.depth() == 0 {
+                return true;
+            }
+            let name = e.file_name().to_string_lossy();
+            !name.starts_with('.') && name != "bak"
+        })
+        .flatten()
+        .filter(|e| e.depth() > 0)
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Focus {
     Browser,
@@ -73,24 +90,12 @@ impl App {
         self.file_items.clear();
 
         // Load only immediate children of the graph root; expand on demand
-        let walker = WalkDir::new(&self.graph_path)
-            .max_depth(1)
-            .sort_by_file_name()
-            .into_iter()
-            .filter_entry(|e| {
-                if e.depth() == 0 {
-                    return true;
-                }
-                let name = e.file_name().to_string_lossy();
-                !name.starts_with('.') && name != "bak"
-            });
-
-        for entry in walker.flatten() {
+        for entry in walk_dir(&self.graph_path) {
             let path = entry.path().to_path_buf();
             let is_dir = entry.file_type().is_dir();
             let is_md = path.extension().map_or(false, |e| e == "md");
 
-            if entry.depth() == 0 || (!is_dir && !is_md) {
+            if !is_dir && !is_md {
                 continue;
             }
 
@@ -127,12 +132,7 @@ impl App {
 
             if is_expanded {
                 // collapse: remove children
-                let depth = self.file_items[idx].depth;
-                let mut end = idx + 1;
-                while end < self.file_items.len() && self.file_items[end].depth > depth {
-                    end += 1;
-                }
-                self.file_items.drain(idx + 1..end);
+                self.collapse_dir(idx);
             } else {
                 // expand: insert children
                 self.expand_dir(idx, &path)?;
@@ -147,26 +147,20 @@ impl App {
         Ok(())
     }
 
+    fn collapse_dir(&mut self, idx: usize) {
+        let depth = self.file_items[idx].depth;
+        let mut end = idx + 1;
+        while end < self.file_items.len() && self.file_items[end].depth > depth {
+            end += 1;
+        }
+        self.file_items.drain(idx + 1..end);
+    }
+
     fn expand_dir(&mut self, parent_idx: usize, dir: &Path) -> Result<()> {
         let parent_depth = self.file_items[parent_idx].depth;
         let mut new_items = Vec::new();
 
-        let walker = WalkDir::new(dir)
-            .max_depth(1)
-            .sort_by_file_name()
-            .into_iter()
-            .filter_entry(|e| {
-                if e.depth() == 0 {
-                    return true;
-                }
-                let name = e.file_name().to_string_lossy();
-                !name.starts_with('.') && name != "bak"
-            });
-
-        for entry in walker.flatten() {
-            if entry.depth() == 0 {
-                continue;
-            }
+        for entry in walk_dir(dir) {
             let path = entry.path().to_path_buf();
             let is_dir = entry.file_type().is_dir();
             let is_md = path.extension().map_or(false, |e| e == "md");
@@ -217,13 +211,8 @@ impl App {
         if item.is_dir && item.is_expanded {
             // collapse this directory
             let idx = self.browser_selected;
-            let depth = self.file_items[idx].depth;
             self.file_items[idx].is_expanded = false;
-            let mut end = idx + 1;
-            while end < self.file_items.len() && self.file_items[end].depth > depth {
-                end += 1;
-            }
-            self.file_items.drain(idx + 1..end);
+            self.collapse_dir(idx);
         } else {
             // jump to parent directory
             let depth = item.depth;
