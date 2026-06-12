@@ -6,7 +6,92 @@ use ratatui::{
     Frame,
 };
 use crate::app::{url_decode, App, Focus};
-use crate::parser::render_line;
+use crate::parser::{ParsedLine, Segment, TaskState};
+
+fn render_line(parsed: &ParsedLine) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+
+    if parsed.indent > 0 {
+        spans.push(Span::raw("  ".repeat(parsed.indent)));
+    }
+
+    if parsed.is_bullet {
+        let bullet_char = match parsed.task {
+            Some(TaskState::Done) | Some(TaskState::Cancelled) => "✓ ",
+            Some(_) => "○ ",
+            None => "• ",
+        };
+        let style = Style::default().fg(Color::DarkGray);
+        spans.push(Span::styled(bullet_char.to_string(), style));
+    }
+
+    if let Some(ref state) = parsed.task {
+        let (label, style) = match state {
+            TaskState::Todo => ("TODO", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            TaskState::Done => ("DONE", Style::default().fg(Color::Green).add_modifier(Modifier::DIM)),
+            TaskState::Later => ("LATER", Style::default().fg(Color::Blue)),
+            TaskState::Now => ("NOW", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            TaskState::Waiting => ("WAITING", Style::default().fg(Color::Cyan)),
+            TaskState::Cancelled => ("CANCELLED", Style::default().fg(Color::DarkGray).add_modifier(Modifier::CROSSED_OUT)),
+        };
+        spans.push(Span::styled(label.to_string(), style));
+        spans.push(Span::raw(" "));
+    }
+
+    for seg in &parsed.segments {
+        match seg {
+            Segment::Plain(s) => {
+                let style = if matches!(parsed.task, Some(TaskState::Done) | Some(TaskState::Cancelled)) {
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+                } else {
+                    Style::default()
+                };
+                spans.push(Span::styled(s.clone(), style));
+            }
+            Segment::PageLink(s) => {
+                spans.push(Span::styled(
+                    format!("[[{}]]", s),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::UNDERLINED),
+                ));
+            }
+            Segment::Tag(s) => {
+                spans.push(Span::styled(
+                    format!("#{}", s),
+                    Style::default().fg(Color::Green),
+                ));
+            }
+            Segment::Bold(s) => {
+                spans.push(Span::styled(s.clone(), Style::default().add_modifier(Modifier::BOLD)));
+            }
+            Segment::Italic(s) => {
+                spans.push(Span::styled(s.clone(), Style::default().add_modifier(Modifier::ITALIC)));
+            }
+            Segment::Code(s) => {
+                spans.push(Span::styled(
+                    s.clone(),
+                    Style::default().fg(Color::Yellow).bg(Color::DarkGray),
+                ));
+            }
+            Segment::BlockRef(s) => {
+                let preview: String = s.chars().take(8).collect();
+                spans.push(Span::styled(
+                    format!("(({}…))", preview),
+                    Style::default().fg(Color::Magenta),
+                ));
+            }
+            Segment::Property(key, val) => {
+                spans.push(Span::styled(
+                    key.clone(),
+                    Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(":: ", Style::default().fg(Color::DarkGray)));
+                spans.push(Span::raw(val.clone()));
+            }
+        }
+    }
+
+    Line::from(spans)
+}
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
