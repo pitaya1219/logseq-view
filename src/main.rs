@@ -22,7 +22,7 @@ fn main() -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             // Try common Logseq locations
-            let home = dirs_next();
+            let home = home_dir();
             for candidate in &[
                 home.join("logseq"),
                 home.join("Logseq"),
@@ -47,7 +47,7 @@ fn main() -> Result<()> {
     run(graph_path)
 }
 
-fn dirs_next() -> PathBuf {
+fn home_dir() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))

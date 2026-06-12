@@ -129,7 +129,6 @@ fn extract_task_state(s: &str) -> (Option<TaskState>, &str) {
 
 fn parse_inline(s: &str) -> Vec<Segment> {
     let mut segments = Vec::new();
-    let mut chars = s.chars().peekable();
     let mut buf = String::new();
 
     macro_rules! flush {
@@ -222,7 +221,6 @@ fn parse_inline(s: &str) -> Vec<Segment> {
         let c = s[i..].chars().next().unwrap();
         buf.push(c);
         i += c.len_utf8();
-        let _ = chars.next();
     }
 
     flush!();
