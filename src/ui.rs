@@ -127,12 +127,7 @@ fn draw_browser(f: &mut Frame, app: &mut App, area: Rect) {
 
     let visible_height = inner.height as usize;
 
-    // Compute scroll offset to keep selected item visible
-    if app.browser_selected < app.browser_offset {
-        app.browser_offset = app.browser_selected;
-    } else if app.browser_selected >= app.browser_offset + visible_height {
-        app.browser_offset = app.browser_selected + 1 - visible_height;
-    }
+    app.clamp_browser_scroll(visible_height);
 
     let items: Vec<ListItem> = app
         .file_items
@@ -208,10 +203,7 @@ fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
     let visible_height = inner.height as usize;
     let total = app.content_lines.len();
 
-    // Clamp scroll
-    if app.content_scroll + visible_height > total && total > visible_height {
-        app.content_scroll = total - visible_height;
-    }
+    app.clamp_content_scroll(visible_height);
 
     let lines: Vec<Line> = app
         .content_lines

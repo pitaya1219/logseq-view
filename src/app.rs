@@ -258,6 +258,21 @@ impl App {
         self.content_scroll = self.content_lines.len().saturating_sub(1);
     }
 
+    pub fn clamp_browser_scroll(&mut self, visible_height: usize) {
+        if self.browser_selected < self.browser_offset {
+            self.browser_offset = self.browser_selected;
+        } else if self.browser_selected >= self.browser_offset + visible_height {
+            self.browser_offset = self.browser_selected + 1 - visible_height;
+        }
+    }
+
+    pub fn clamp_content_scroll(&mut self, visible_height: usize) {
+        let total = self.content_lines.len();
+        if self.content_scroll + visible_height > total && total > visible_height {
+            self.content_scroll = total - visible_height;
+        }
+    }
+
     pub fn toggle_focus(&mut self) {
         self.focus = match self.focus {
             Focus::Browser => Focus::Content,
