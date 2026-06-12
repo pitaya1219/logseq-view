@@ -295,8 +295,9 @@ pub fn render_line(parsed: &ParsedLine) -> Line<'static> {
                 ));
             }
             Segment::BlockRef(s) => {
+                let preview: String = s.chars().take(8).collect();
                 spans.push(Span::styled(
-                    format!("(({}…))", &s[..s.len().min(8)]),
+                    format!("(({}…))", preview),
                     Style::default().fg(Color::Magenta),
                 ));
             }

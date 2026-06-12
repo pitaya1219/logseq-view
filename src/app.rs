@@ -3,7 +3,7 @@ use walkdir::WalkDir;
 use anyhow::Result;
 use crate::parser::{parse_file, ParsedLine};
 
-fn url_decode(s: &str) -> String {
+pub fn url_decode(s: &str) -> String {
     let mut buf: Vec<u8> = Vec::with_capacity(s.len());
     let src = s.as_bytes();
     let mut i = 0;

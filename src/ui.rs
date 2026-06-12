@@ -5,7 +5,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     Frame,
 };
-use crate::app::{App, Focus};
+use crate::app::{url_decode, App, Focus};
 use crate::parser::render_line;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -97,7 +97,7 @@ fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
         .current_file
         .as_ref()
         .and_then(|p| p.file_stem())
-        .map(|s| format!(" {} ", s.to_string_lossy()))
+        .map(|s| format!(" {} ", url_decode(&s.to_string_lossy())))
         .unwrap_or_else(|| " (no file) ".to_string());
 
     let block = Block::default()
