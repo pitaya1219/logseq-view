@@ -37,10 +37,7 @@ fn main() -> Result<()> {
         });
 
     if !graph_path.exists() {
-        eprintln!(
-            "error: path does not exist: {}",
-            graph_path.display()
-        );
+        eprintln!("error: path does not exist: {}", graph_path.display());
         std::process::exit(1);
     }
 
@@ -87,37 +84,41 @@ fn event_loop(
             let was_pending_g = pending_g;
             pending_g = false;
 
-            match app.focus {
-                Focus::Browser => match key.code {
-                    KeyCode::Char('q') => break,
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
-                    KeyCode::Tab => app.toggle_focus(),
-                    KeyCode::Down | KeyCode::Char('j') => app.browser_down(),
-                    KeyCode::Up | KeyCode::Char('k') => app.browser_up(),
-                    KeyCode::Enter | KeyCode::Char('l') => {
-                        app.open_selected()?;
+            // Handle quit keys first (applies to all focus modes)
+            match key.code {
+                KeyCode::Char('q') => break,
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                _ => {
+                    // Dispatch to focus-specific handling
+                    match app.focus {
+                        Focus::Browser => match key.code {
+                            KeyCode::Tab => app.toggle_focus(),
+                            KeyCode::Down | KeyCode::Char('j') => app.browser_down(),
+                            KeyCode::Up | KeyCode::Char('k') => app.browser_up(),
+                            KeyCode::Enter | KeyCode::Char('l') => {
+                                app.open_selected()?;
+                            }
+                            KeyCode::Char('h') => app.collapse_or_jump_parent(),
+                            _ => {}
+                        },
+                        Focus::Content => match key.code {
+                            KeyCode::Tab | KeyCode::Char('h') => app.toggle_focus(),
+                            KeyCode::Down | KeyCode::Char('j') => app.content_down(1),
+                            KeyCode::Up | KeyCode::Char('k') => app.content_up(1),
+                            KeyCode::PageDown => app.content_down(20),
+                            KeyCode::PageUp => app.content_up(20),
+                            KeyCode::Char('G') => app.content_bottom(),
+                            KeyCode::Char('g') => {
+                                if was_pending_g {
+                                    app.content_top();
+                                } else {
+                                    pending_g = true;
+                                }
+                            }
+                            _ => {}
+                        },
                     }
-                    KeyCode::Char('h') => app.collapse_or_jump_parent(),
-                    _ => {}
-                },
-                Focus::Content => match key.code {
-                    KeyCode::Char('q') => break,
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
-                    KeyCode::Tab | KeyCode::Char('h') => app.toggle_focus(),
-                    KeyCode::Down | KeyCode::Char('j') => app.content_down(1),
-                    KeyCode::Up | KeyCode::Char('k') => app.content_up(1),
-                    KeyCode::PageDown => app.content_down(20),
-                    KeyCode::PageUp => app.content_up(20),
-                    KeyCode::Char('G') => app.content_bottom(),
-                    KeyCode::Char('g') => {
-                        if was_pending_g {
-                            app.content_top();
-                        } else {
-                            pending_g = true;
-                        }
-                    }
-                    _ => {}
-                },
+                }
             }
         }
     }

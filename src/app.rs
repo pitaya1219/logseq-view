@@ -1,7 +1,7 @@
+use crate::parser::{parse_file, ParsedLine};
+use anyhow::Result;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
-use anyhow::Result;
-use crate::parser::{parse_file, ParsedLine};
 
 pub fn url_decode(s: &str) -> String {
     let mut buf: Vec<u8> = Vec::with_capacity(s.len());
@@ -93,7 +93,7 @@ impl App {
         for entry in walk_dir(&self.graph_path) {
             let path = entry.path().to_path_buf();
             let is_dir = entry.file_type().is_dir();
-            let is_md = path.extension().map_or(false, |e| e == "md");
+            let is_md = path.extension().is_some_and(|e| e == "md");
 
             if !is_dir && !is_md {
                 continue;
@@ -163,7 +163,7 @@ impl App {
         for entry in walk_dir(dir) {
             let path = entry.path().to_path_buf();
             let is_dir = entry.file_type().is_dir();
-            let is_md = path.extension().map_or(false, |e| e == "md");
+            let is_md = path.extension().is_some_and(|e| e == "md");
 
             if !is_dir && !is_md {
                 continue;

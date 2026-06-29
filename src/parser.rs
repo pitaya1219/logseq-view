@@ -223,4 +223,3 @@ fn parse_inline(s: &str) -> Vec<Segment> {
     flush!();
     segments
 }
-

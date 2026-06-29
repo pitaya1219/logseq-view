@@ -1,12 +1,15 @@
+use crate::app::{url_decode, App, Focus};
+use crate::parser::{ParsedLine, Segment, TaskState};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{
+        Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+        Wrap,
+    },
     Frame,
 };
-use crate::app::{url_decode, App, Focus};
-use crate::parser::{ParsedLine, Segment, TaskState};
 
 fn render_line(parsed: &ParsedLine) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
@@ -27,12 +30,32 @@ fn render_line(parsed: &ParsedLine) -> Line<'static> {
 
     if let Some(ref state) = parsed.task {
         let (label, style) = match state {
-            TaskState::Todo => ("TODO", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            TaskState::Done => ("DONE", Style::default().fg(Color::Green).add_modifier(Modifier::DIM)),
+            TaskState::Todo => (
+                "TODO",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            TaskState::Done => (
+                "DONE",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::DIM),
+            ),
             TaskState::Later => ("LATER", Style::default().fg(Color::Blue)),
-            TaskState::Now => ("NOW", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            TaskState::Now => (
+                "NOW",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
             TaskState::Waiting => ("WAITING", Style::default().fg(Color::Cyan)),
-            TaskState::Cancelled => ("CANCELLED", Style::default().fg(Color::DarkGray).add_modifier(Modifier::CROSSED_OUT)),
+            TaskState::Cancelled => (
+                "CANCELLED",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::CROSSED_OUT),
+            ),
         };
         spans.push(Span::styled(label.to_string(), style));
         spans.push(Span::raw(" "));
@@ -41,8 +64,13 @@ fn render_line(parsed: &ParsedLine) -> Line<'static> {
     for seg in &parsed.segments {
         match seg {
             Segment::Plain(s) => {
-                let style = if matches!(parsed.task, Some(TaskState::Done) | Some(TaskState::Cancelled)) {
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+                let style = if matches!(
+                    parsed.task,
+                    Some(TaskState::Done) | Some(TaskState::Cancelled)
+                ) {
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM)
                 } else {
                     Style::default()
                 };
@@ -51,7 +79,9 @@ fn render_line(parsed: &ParsedLine) -> Line<'static> {
             Segment::PageLink(s) => {
                 spans.push(Span::styled(
                     format!("[[{}]]", s),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::UNDERLINED),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::UNDERLINED),
                 ));
             }
             Segment::Tag(s) => {
@@ -61,10 +91,16 @@ fn render_line(parsed: &ParsedLine) -> Line<'static> {
                 ));
             }
             Segment::Bold(s) => {
-                spans.push(Span::styled(s.clone(), Style::default().add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(
+                    s.clone(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ));
             }
             Segment::Italic(s) => {
-                spans.push(Span::styled(s.clone(), Style::default().add_modifier(Modifier::ITALIC)));
+                spans.push(Span::styled(
+                    s.clone(),
+                    Style::default().add_modifier(Modifier::ITALIC),
+                ));
             }
             Segment::Code(s) => {
                 spans.push(Span::styled(
@@ -82,7 +118,9 @@ fn render_line(parsed: &ParsedLine) -> Line<'static> {
             Segment::Property(key, val) => {
                 spans.push(Span::styled(
                     key.clone(),
-                    Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Blue)
+                        .add_modifier(Modifier::BOLD),
                 ));
                 spans.push(Span::styled(":: ", Style::default().fg(Color::DarkGray)));
                 spans.push(Span::raw(val.clone()));
@@ -118,7 +156,10 @@ fn draw_browser(f: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let block = Block::default()
-        .title(Span::styled(" Files ", Style::default().add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            " Files ",
+            Style::default().add_modifier(Modifier::BOLD),
+        ))
         .borders(Borders::ALL)
         .border_style(border_style);
 
@@ -139,7 +180,11 @@ fn draw_browser(f: &mut Frame, app: &mut App, area: Rect) {
             let abs_idx = i + app.browser_offset;
             let indent = "  ".repeat(item.depth);
             let icon = if item.is_dir {
-                if item.is_expanded { "▼ " } else { "▶ " }
+                if item.is_expanded {
+                    "▼ "
+                } else {
+                    "▶ "
+                }
             } else {
                 "  "
             };
@@ -152,7 +197,9 @@ fn draw_browser(f: &mut Frame, app: &mut App, area: Rect) {
                     Style::default().fg(Color::Black).bg(Color::DarkGray)
                 }
             } else if item.is_dir {
-                Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
@@ -181,7 +228,10 @@ fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
         .unwrap_or_else(|| " (no file) ".to_string());
 
     let block = Block::default()
-        .title(Span::styled(title, Style::default().add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            title,
+            Style::default().add_modifier(Modifier::BOLD),
+        ))
         .borders(Borders::ALL)
         .border_style(border_style);
 
@@ -222,11 +272,14 @@ fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
             .orientation(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("↑"))
             .end_symbol(Some("↓"));
-        let mut scrollbar_state = ScrollbarState::new(total.saturating_sub(visible_height))
-            .position(app.content_scroll);
+        let mut scrollbar_state =
+            ScrollbarState::new(total.saturating_sub(visible_height)).position(app.content_scroll);
         f.render_stateful_widget(
             scrollbar,
-            area.inner(ratatui::layout::Margin { vertical: 1, horizontal: 0 }),
+            area.inner(ratatui::layout::Margin {
+                vertical: 1,
+                horizontal: 0,
+            }),
             &mut scrollbar_state,
         );
     }
@@ -236,7 +289,13 @@ fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
     let hints = match app.focus {
         Focus::Browser => {
             vec![
-                Span::styled(" BROWSER ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " BROWSER ",
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(" "),
                 Span::styled("↑↓/jk", Style::default().fg(Color::Yellow)),
                 Span::raw(" navigate  "),
@@ -250,7 +309,13 @@ fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
         }
         Focus::Content => {
             vec![
-                Span::styled(" CONTENT ", Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " CONTENT ",
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(" "),
                 Span::styled("↑↓/jk", Style::default().fg(Color::Yellow)),
                 Span::raw(" scroll  "),
@@ -264,7 +329,6 @@ fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
         }
     };
 
-    let bar = Paragraph::new(Line::from(hints))
-        .style(Style::default().bg(Color::Reset));
+    let bar = Paragraph::new(Line::from(hints)).style(Style::default().bg(Color::Reset));
     f.render_widget(bar, area);
 }
