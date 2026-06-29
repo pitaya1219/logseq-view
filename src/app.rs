@@ -40,6 +40,31 @@ fn walk_dir(dir: &Path) -> Vec<walkdir::DirEntry> {
         .collect()
 }
 
+fn make_file_item(entry: &walkdir::DirEntry, depth: usize) -> Option<FileItem> {
+    let path = entry.path().to_path_buf();
+    let is_dir = entry.file_type().is_dir();
+    let is_md = path.extension().is_some_and(|e| e == "md");
+
+    if !is_dir && !is_md {
+        return None;
+    }
+
+    let name = url_decode(
+        &path
+            .file_stem()
+            .unwrap_or(entry.file_name())
+            .to_string_lossy(),
+    );
+
+    Some(FileItem {
+        path,
+        name,
+        depth,
+        is_dir,
+        is_expanded: false,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Focus {
     Browser,
@@ -91,28 +116,9 @@ impl App {
 
         // Load only immediate children of the graph root; expand on demand
         for entry in walk_dir(&self.graph_path) {
-            let path = entry.path().to_path_buf();
-            let is_dir = entry.file_type().is_dir();
-            let is_md = path.extension().is_some_and(|e| e == "md");
-
-            if !is_dir && !is_md {
-                continue;
+            if let Some(item) = make_file_item(&entry, 0) {
+                self.file_items.push(item);
             }
-
-            let name = url_decode(
-                &path
-                    .file_stem()
-                    .unwrap_or(entry.file_name())
-                    .to_string_lossy(),
-            );
-
-            self.file_items.push(FileItem {
-                path,
-                name,
-                depth: 0,
-                is_dir,
-                is_expanded: false,
-            });
         }
 
         Ok(())
@@ -161,28 +167,9 @@ impl App {
         let mut new_items = Vec::new();
 
         for entry in walk_dir(dir) {
-            let path = entry.path().to_path_buf();
-            let is_dir = entry.file_type().is_dir();
-            let is_md = path.extension().is_some_and(|e| e == "md");
-
-            if !is_dir && !is_md {
-                continue;
+            if let Some(item) = make_file_item(&entry, parent_depth + 1) {
+                new_items.push(item);
             }
-
-            let name = url_decode(
-                &path
-                    .file_stem()
-                    .unwrap_or(entry.file_name())
-                    .to_string_lossy(),
-            );
-
-            new_items.push(FileItem {
-                path,
-                name,
-                depth: parent_depth + 1,
-                is_dir,
-                is_expanded: false,
-            });
         }
 
         let insert_at = parent_idx + 1;
@@ -286,6 +273,7 @@ impl App {
 mod tests {
     use super::*;
     use crate::parser::ParsedLine;
+    use std::fs;
 
     fn make_app() -> App {
         App {
@@ -311,7 +299,34 @@ mod tests {
             .collect()
     }
 
-    // clamp_browser_scroll
+    // --- url_decode tests ---
+
+    #[test]
+    fn url_decode_percent_encoded_space() {
+        assert_eq!(url_decode("hello%20world"), "hello world");
+    }
+
+    #[test]
+    fn url_decode_invalid_percent_left_as_is() {
+        assert_eq!(url_decode("hello%2"), "hello%2");
+        assert_eq!(url_decode("hello%ZZ"), "hello%ZZ");
+    }
+
+    #[test]
+    fn url_decode_utf8_multibyte() {
+        // %E3%81%82 is the UTF-8 encoding for あ
+        assert_eq!(url_decode("%E3%81%82"), "あ");
+    }
+
+    #[test]
+    fn url_decode_mixed_encoded_and_plain() {
+        assert_eq!(
+            url_decode("file%20name%20with%20spaces.txt"),
+            "file name with spaces.txt"
+        );
+    }
+
+    // --- clamp_browser_scroll ---
 
     #[test]
     fn browser_scroll_selected_before_offset_clamps_up() {
@@ -340,7 +355,7 @@ mod tests {
         assert_eq!(app.browser_offset, 2);
     }
 
-    // clamp_content_scroll
+    // --- clamp_content_scroll ---
 
     #[test]
     fn content_scroll_clamped_when_past_end() {
@@ -367,5 +382,145 @@ mod tests {
         app.content_scroll = 10;
         app.clamp_content_scroll(10);
         assert_eq!(app.content_scroll, 10);
+    }
+
+    // --- File tree tests ---
+
+    #[test]
+    fn build_file_tree_includes_dirs_and_markdown() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let temp_path = temp_dir.path();
+
+        // Create test structure
+        fs::write(temp_path.join("note.md"), "# Note").unwrap();
+        fs::write(temp_path.join("ignore.txt"), "ignored").unwrap();
+        fs::create_dir(temp_path.join("subfolder")).unwrap();
+        fs::write(temp_path.join(".hidden"), "hidden file").unwrap();
+        fs::write(temp_path.join("bak"), "backup file").unwrap();
+
+        let mut app = App {
+            graph_path: temp_path.to_path_buf(),
+            focus: Focus::Browser,
+            file_items: Vec::new(),
+            browser_selected: 0,
+            browser_offset: 0,
+            current_file: None,
+            content_lines: Vec::new(),
+            content_scroll: 0,
+        };
+
+        app.build_file_tree().unwrap();
+
+        // Should include .md file and directory, but not .txt, .hidden, or bak
+        let names: Vec<_> = app.file_items.iter().map(|i| i.name.as_str()).collect();
+        assert!(names.contains(&"note"));
+        assert!(names.contains(&"subfolder"));
+        assert!(!names.contains(&"ignore"));
+        assert!(!names.contains(&".hidden"));
+        assert!(!names.contains(&"bak"));
+    }
+
+    #[test]
+    fn expand_dir_inserts_children_with_correct_depth() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let temp_path = temp_dir.path();
+
+        // Create nested structure
+        let subdir = temp_path.join("dir1");
+        fs::create_dir(&subdir).unwrap();
+        fs::write(subdir.join("child.md"), "content").unwrap();
+
+        let mut app = App {
+            graph_path: temp_path.to_path_buf(),
+            focus: Focus::Browser,
+            file_items: Vec::new(),
+            browser_selected: 0,
+            browser_offset: 0,
+            current_file: None,
+            content_lines: Vec::new(),
+            content_scroll: 0,
+        };
+
+        app.build_file_tree().unwrap();
+        assert_eq!(app.file_items.len(), 1);
+        assert_eq!(app.file_items[0].name, "dir1");
+        assert_eq!(app.file_items[0].depth, 0);
+
+        // Expand the directory
+        app.expand_dir(0, &subdir).unwrap();
+
+        // Should now have parent and child
+        assert_eq!(app.file_items.len(), 2);
+        assert_eq!(app.file_items[0].name, "dir1");
+        assert_eq!(app.file_items[0].depth, 0);
+        assert_eq!(app.file_items[1].name, "child");
+        assert_eq!(app.file_items[1].depth, 1);
+    }
+
+    #[test]
+    fn collapse_dir_drains_children() {
+        let mut app = make_app();
+        app.file_items = vec![
+            FileItem {
+                path: PathBuf::from("a"),
+                name: "a".to_string(),
+                depth: 0,
+                is_dir: true,
+                is_expanded: true,
+            },
+            FileItem {
+                path: PathBuf::from("b"),
+                name: "b".to_string(),
+                depth: 1,
+                is_dir: false,
+                is_expanded: false,
+            },
+            FileItem {
+                path: PathBuf::from("c"),
+                name: "c".to_string(),
+                depth: 1,
+                is_dir: false,
+                is_expanded: false,
+            },
+            FileItem {
+                path: PathBuf::from("d"),
+                name: "d".to_string(),
+                depth: 0,
+                is_dir: true,
+                is_expanded: false,
+            },
+        ];
+
+        app.collapse_dir(0);
+
+        assert_eq!(app.file_items.len(), 2);
+        assert_eq!(app.file_items[0].name, "a");
+        assert_eq!(app.file_items[1].name, "d");
+    }
+
+    #[test]
+    fn collapse_or_jump_parent_jumps_to_parent() {
+        let mut app = make_app();
+        app.file_items = vec![
+            FileItem {
+                path: PathBuf::from("parent"),
+                name: "parent".to_string(),
+                depth: 0,
+                is_dir: true,
+                is_expanded: true,
+            },
+            FileItem {
+                path: PathBuf::from("child"),
+                name: "child".to_string(),
+                depth: 1,
+                is_dir: false,
+                is_expanded: false,
+            },
+        ];
+
+        app.browser_selected = 1;
+        app.collapse_or_jump_parent();
+
+        assert_eq!(app.browser_selected, 0);
     }
 }
