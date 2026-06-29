@@ -281,3 +281,91 @@ impl App {
         };
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::ParsedLine;
+
+    fn make_app() -> App {
+        App {
+            graph_path: PathBuf::new(),
+            focus: Focus::Browser,
+            file_items: Vec::new(),
+            browser_selected: 0,
+            browser_offset: 0,
+            current_file: None,
+            content_lines: Vec::new(),
+            content_scroll: 0,
+        }
+    }
+
+    fn dummy_lines(n: usize) -> Vec<ParsedLine> {
+        (0..n)
+            .map(|_| ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: Vec::new(),
+            })
+            .collect()
+    }
+
+    // clamp_browser_scroll
+
+    #[test]
+    fn browser_scroll_selected_before_offset_clamps_up() {
+        let mut app = make_app();
+        app.browser_offset = 5;
+        app.browser_selected = 3;
+        app.clamp_browser_scroll(10);
+        assert_eq!(app.browser_offset, 3);
+    }
+
+    #[test]
+    fn browser_scroll_selected_past_window_slides_down() {
+        let mut app = make_app();
+        app.browser_offset = 0;
+        app.browser_selected = 10;
+        app.clamp_browser_scroll(5);
+        assert_eq!(app.browser_offset, 6);
+    }
+
+    #[test]
+    fn browser_scroll_selected_within_window_unchanged() {
+        let mut app = make_app();
+        app.browser_offset = 2;
+        app.browser_selected = 4;
+        app.clamp_browser_scroll(10);
+        assert_eq!(app.browser_offset, 2);
+    }
+
+    // clamp_content_scroll
+
+    #[test]
+    fn content_scroll_clamped_when_past_end() {
+        let mut app = make_app();
+        app.content_lines = dummy_lines(20);
+        app.content_scroll = 15;
+        app.clamp_content_scroll(10);
+        assert_eq!(app.content_scroll, 10);
+    }
+
+    #[test]
+    fn content_scroll_unchanged_when_all_lines_fit() {
+        let mut app = make_app();
+        app.content_lines = dummy_lines(5);
+        app.content_scroll = 0;
+        app.clamp_content_scroll(10);
+        assert_eq!(app.content_scroll, 0);
+    }
+
+    #[test]
+    fn content_scroll_already_at_end_unchanged() {
+        let mut app = make_app();
+        app.content_lines = dummy_lines(20);
+        app.content_scroll = 10;
+        app.clamp_content_scroll(10);
+        assert_eq!(app.content_scroll, 10);
+    }
+}
