@@ -1,0 +1,7 @@
+# Core boundary lint rules for logseq-view.
+# This file accumulates config-based guards at the crate boundary.
+# Disallowed methods enforce architecture rules (e.g., no direct process exits in library code).
+
+[[disallowed-methods]]
+path = "std::process::abort"
+reason = "Do not abort the process. Return errors instead so callers can handle them."

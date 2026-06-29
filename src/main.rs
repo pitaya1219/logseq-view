@@ -1,7 +1,3 @@
-mod app;
-mod parser;
-mod ui;
-
 use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -12,9 +8,8 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use logseq_view::app::{App, Focus};
 use ratatui::{backend::CrosstermBackend, Terminal};
-
-use app::{App, Focus};
 
 fn main() -> Result<()> {
     let graph_path = std::env::args()
@@ -74,7 +69,7 @@ fn event_loop(
     let mut pending_g = false;
 
     loop {
-        terminal.draw(|f| ui::draw(f, &mut app))?;
+        terminal.draw(|f| logseq_view::ui::draw(f, &mut app))?;
 
         if !event::poll(Duration::from_millis(200))? {
             continue;
