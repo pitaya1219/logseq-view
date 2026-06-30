@@ -20,7 +20,7 @@
             cargoLock.lockFile = ./Cargo.lock;
             meta = with pkgs.lib; {
               description = "TUI viewer for Logseq markdown files";
-              homepage = "https://git.pitaya.f5.si/pitaya1219/logseq-view";
+              homepage = "https://github.com/pitaya1219/logseq-view";
               license = licenses.mit;
               mainProgram = "lqview";
             };
