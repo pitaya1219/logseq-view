@@ -1,8 +1,9 @@
-use crate::app::{App, Focus};
+use crate::app::Focus;
 use crate::parser::{ParsedLine, Segment, TaskState};
-use crate::source::{url_decode, GraphSource};
+use crate::source::GraphSource;
+use crate::view_model::ViewModel;
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
@@ -132,7 +133,7 @@ fn render_line(parsed: &ParsedLine) -> Line<'static> {
     Line::from(spans)
 }
 
-pub fn draw<S: GraphSource>(f: &mut Frame, app: &mut App<S>) {
+pub fn draw<S: GraphSource>(f: &mut Frame, app: &mut crate::app::App<S>) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(1)])
@@ -143,13 +144,19 @@ pub fn draw<S: GraphSource>(f: &mut Frame, app: &mut App<S>) {
         .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
         .split(chunks[0]);
 
-    draw_browser(f, app, main_chunks[0]);
-    draw_content(f, app, main_chunks[1]);
-    draw_statusbar(f, app, chunks[1]);
+    let browser_visible_height = main_chunks[0].height as usize;
+    let content_visible_height = main_chunks[1].height as usize;
+
+    let vm =
+        crate::view_model::build_view_model(app, browser_visible_height, content_visible_height);
+
+    draw_browser(f, &vm, main_chunks[0]);
+    draw_content(f, &vm, main_chunks[1]);
+    draw_statusbar(f, &vm, chunks[1]);
 }
 
-fn draw_browser<S: GraphSource>(f: &mut Frame, app: &mut App<S>, area: Rect) {
-    let focused = app.focus == Focus::Browser;
+fn draw_browser(f: &mut Frame, vm: &ViewModel, area: Rect) {
+    let focused = vm.browser.focused;
     let border_style = if focused {
         Style::default().fg(Color::Cyan)
     } else {
@@ -167,21 +174,14 @@ fn draw_browser<S: GraphSource>(f: &mut Frame, app: &mut App<S>, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let visible_height = inner.height as usize;
-
-    app.clamp_browser_scroll(visible_height);
-
-    let items: Vec<ListItem> = app
-        .file_items
+    let items: Vec<ListItem> = vm
+        .browser
+        .visible_rows
         .iter()
-        .skip(app.browser_offset)
-        .take(visible_height)
-        .enumerate()
-        .map(|(i, item)| {
-            let abs_idx = i + app.browser_offset;
-            let indent = "  ".repeat(item.depth);
-            let icon = if item.is_dir {
-                if item.is_expanded {
+        .map(|row| {
+            let indent = "  ".repeat(row.depth);
+            let icon = if row.is_dir {
+                if row.is_expanded {
                     "▼ "
                 } else {
                     "▶ "
@@ -189,15 +189,15 @@ fn draw_browser<S: GraphSource>(f: &mut Frame, app: &mut App<S>, area: Rect) {
             } else {
                 "  "
             };
-            let label = format!("{}{}{}", indent, icon, item.name);
+            let label = format!("{}{}{}", indent, icon, row.name);
 
-            let style = if abs_idx == app.browser_selected {
+            let style = if row.is_selected {
                 if focused {
                     Style::default().fg(Color::Black).bg(Color::Cyan)
                 } else {
                     Style::default().fg(Color::Black).bg(Color::DarkGray)
                 }
-            } else if item.is_dir {
+            } else if row.is_dir {
                 Style::default()
                     .fg(Color::Blue)
                     .add_modifier(Modifier::BOLD)
@@ -213,24 +213,17 @@ fn draw_browser<S: GraphSource>(f: &mut Frame, app: &mut App<S>, area: Rect) {
     f.render_widget(list, inner);
 }
 
-fn draw_content<S: GraphSource>(f: &mut Frame, app: &mut App<S>, area: Rect) {
-    let focused = app.focus == Focus::Content;
+fn draw_content(f: &mut Frame, vm: &ViewModel, area: Rect) {
+    let focused = vm.content.focused;
     let border_style = if focused {
         Style::default().fg(Color::Cyan)
     } else {
         Style::default().fg(Color::DarkGray)
     };
 
-    let title = app
-        .current_file
-        .as_ref()
-        .and_then(|p| p.file_stem())
-        .map(|s| format!(" {} ", url_decode(&s.to_string_lossy())))
-        .unwrap_or_else(|| " (no file) ".to_string());
-
     let block = Block::default()
         .title(Span::styled(
-            title,
+            vm.content.title.clone(),
             Style::default().add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
@@ -239,7 +232,7 @@ fn draw_content<S: GraphSource>(f: &mut Frame, app: &mut App<S>, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    if app.current_file.is_none() {
+    if vm.content.no_file_loaded {
         let hint = Paragraph::new(vec![
             Line::from(""),
             Line::from(vec![Span::styled(
@@ -251,33 +244,22 @@ fn draw_content<S: GraphSource>(f: &mut Frame, app: &mut App<S>, area: Rect) {
         return;
     }
 
-    let visible_height = inner.height as usize;
-    let total = app.content_lines.len();
-
-    app.clamp_content_scroll(visible_height);
-
-    let lines: Vec<Line> = app
-        .content_lines
-        .iter()
-        .skip(app.content_scroll)
-        .take(visible_height)
-        .map(render_line)
-        .collect();
+    let lines: Vec<Line> = vm.content.visible_lines.iter().map(render_line).collect();
 
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
     f.render_widget(paragraph, inner);
 
     // Scrollbar
-    if total > visible_height {
+    if let Some(scrollbar_info) = &vm.content.scrollbar {
         let scrollbar = Scrollbar::default()
             .orientation(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("↑"))
             .end_symbol(Some("↓"));
         let mut scrollbar_state =
-            ScrollbarState::new(total.saturating_sub(visible_height)).position(app.content_scroll);
+            ScrollbarState::new(scrollbar_info.total).position(scrollbar_info.position);
         f.render_stateful_widget(
             scrollbar,
-            area.inner(ratatui::layout::Margin {
+            area.inner(Margin {
                 vertical: 1,
                 horizontal: 0,
             }),
@@ -286,8 +268,8 @@ fn draw_content<S: GraphSource>(f: &mut Frame, app: &mut App<S>, area: Rect) {
     }
 }
 
-fn draw_statusbar<S: GraphSource>(f: &mut Frame, app: &App<S>, area: Rect) {
-    let hints = match app.focus {
+fn draw_statusbar(f: &mut Frame, vm: &ViewModel, area: Rect) {
+    let hints = match vm.focus {
         Focus::Browser => {
             vec![
                 Span::styled(
