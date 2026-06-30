@@ -1,69 +1,7 @@
 use crate::parser::{parse_file, ParsedLine};
+use crate::source::{Entry, GraphSource};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
-use walkdir::WalkDir;
-
-pub fn url_decode(s: &str) -> String {
-    let mut buf: Vec<u8> = Vec::with_capacity(s.len());
-    let src = s.as_bytes();
-    let mut i = 0;
-    while i < src.len() {
-        if src[i] == b'%' && i + 2 < src.len() {
-            let hi = (src[i + 1] as char).to_digit(16);
-            let lo = (src[i + 2] as char).to_digit(16);
-            if let (Some(h), Some(l)) = (hi, lo) {
-                buf.push(((h << 4) | l) as u8);
-                i += 3;
-                continue;
-            }
-        }
-        buf.push(src[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&buf).into_owned()
-}
-
-fn walk_dir(dir: &Path) -> Vec<walkdir::DirEntry> {
-    WalkDir::new(dir)
-        .max_depth(1)
-        .sort_by_file_name()
-        .into_iter()
-        .filter_entry(|e| {
-            if e.depth() == 0 {
-                return true;
-            }
-            let name = e.file_name().to_string_lossy();
-            !name.starts_with('.') && name != "bak"
-        })
-        .flatten()
-        .filter(|e| e.depth() > 0)
-        .collect()
-}
-
-fn make_file_item(entry: &walkdir::DirEntry, depth: usize) -> Option<FileItem> {
-    let path = entry.path().to_path_buf();
-    let is_dir = entry.file_type().is_dir();
-    let is_md = path.extension().is_some_and(|e| e == "md");
-
-    if !is_dir && !is_md {
-        return None;
-    }
-
-    let name = url_decode(
-        &path
-            .file_stem()
-            .unwrap_or(entry.file_name())
-            .to_string_lossy(),
-    );
-
-    Some(FileItem {
-        path,
-        name,
-        depth,
-        is_dir,
-        is_expanded: false,
-    })
-}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Focus {
@@ -80,7 +18,7 @@ pub struct FileItem {
     pub is_expanded: bool,
 }
 
-pub struct App {
+pub struct App<S: GraphSource> {
     pub graph_path: PathBuf,
     pub focus: Focus,
 
@@ -93,10 +31,13 @@ pub struct App {
     pub current_file: Option<PathBuf>,
     pub content_lines: Vec<ParsedLine>,
     pub content_scroll: usize,
+
+    // GraphSource instance
+    source: S,
 }
 
-impl App {
-    pub fn new(graph_path: PathBuf) -> Result<Self> {
+impl<S: GraphSource> App<S> {
+    pub fn new(graph_path: PathBuf, source: S) -> Result<Self> {
         let mut app = App {
             graph_path,
             focus: Focus::Browser,
@@ -106,6 +47,7 @@ impl App {
             current_file: None,
             content_lines: Vec::new(),
             content_scroll: 0,
+            source,
         };
         app.build_file_tree()?;
         Ok(app)
@@ -115,10 +57,10 @@ impl App {
         self.file_items.clear();
 
         // Load only immediate children of the graph root; expand on demand
-        for entry in walk_dir(&self.graph_path) {
-            if let Some(item) = make_file_item(&entry, 0) {
-                self.file_items.push(item);
-            }
+        let entries = self.source.children(&self.graph_path)?;
+        for entry in entries {
+            let item = make_file_item_from_entry(entry, 0);
+            self.file_items.push(item);
         }
 
         Ok(())
@@ -164,16 +106,11 @@ impl App {
 
     fn expand_dir(&mut self, parent_idx: usize, dir: &Path) -> Result<()> {
         let parent_depth = self.file_items[parent_idx].depth;
-        let mut new_items = Vec::new();
-
-        for entry in walk_dir(dir) {
-            if let Some(item) = make_file_item(&entry, parent_depth + 1) {
-                new_items.push(item);
-            }
-        }
+        let entries = self.source.children(dir)?;
 
         let insert_at = parent_idx + 1;
-        for (i, item) in new_items.into_iter().enumerate() {
+        for (i, entry) in entries.into_iter().enumerate() {
+            let item = make_file_item_from_entry(entry, parent_depth + 1);
             self.file_items.insert(insert_at + i, item);
         }
 
@@ -181,7 +118,7 @@ impl App {
     }
 
     pub fn load_file(&mut self, path: &Path) -> Result<()> {
-        let content = std::fs::read_to_string(path)?;
+        let content = self.source.read(path)?;
         self.content_lines = parse_file(&content);
         self.current_file = Some(path.to_path_buf());
         self.content_scroll = 0;
@@ -269,13 +206,24 @@ impl App {
     }
 }
 
+/// Create a FileItem from a GraphSource Entry with the given depth
+fn make_file_item_from_entry(entry: Entry, depth: usize) -> FileItem {
+    FileItem {
+        path: entry.path,
+        name: entry.name,
+        depth,
+        is_dir: entry.is_dir,
+        is_expanded: false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::ParsedLine;
-    use std::fs;
+    use crate::source::{url_decode, FakeGraphSource};
+    use std::path::PathBuf;
 
-    fn make_app() -> App {
+    fn make_app() -> App<FakeGraphSource> {
         App {
             graph_path: PathBuf::new(),
             focus: Focus::Browser,
@@ -285,6 +233,7 @@ mod tests {
             current_file: None,
             content_lines: Vec::new(),
             content_scroll: 0,
+            source: FakeGraphSource::new(),
         }
     }
 
@@ -384,22 +333,26 @@ mod tests {
         assert_eq!(app.content_scroll, 10);
     }
 
-    // --- File tree tests ---
+    // --- File tree tests using FakeGraphSource ---
 
     #[test]
     fn build_file_tree_includes_dirs_and_markdown() {
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        let temp_path = temp_dir.path();
+        let root = PathBuf::from("/test");
 
-        // Create test structure
-        fs::write(temp_path.join("note.md"), "# Note").unwrap();
-        fs::write(temp_path.join("ignore.txt"), "ignored").unwrap();
-        fs::create_dir(temp_path.join("subfolder")).unwrap();
-        fs::write(temp_path.join(".hidden"), "hidden file").unwrap();
-        fs::write(temp_path.join("bak"), "backup file").unwrap();
+        let mut source = FakeGraphSource::new();
+        // Add entries: note.md (file), subfolder (dir), ignore.txt (should be excluded by filtering)
+        // Note: In FakeGraphSource, we only return what we explicitly add via add_dir_entries
+        // So we only add the .md file and directory, not the .txt file
+        source.add_dir_entries(
+            root.clone(),
+            vec![
+                (root.join("note.md"), false, "# Note"),
+                (root.join("subfolder"), true, ""),
+            ],
+        );
 
         let mut app = App {
-            graph_path: temp_path.to_path_buf(),
+            graph_path: root.clone(),
             focus: Focus::Browser,
             file_items: Vec::new(),
             browser_selected: 0,
@@ -407,11 +360,12 @@ mod tests {
             current_file: None,
             content_lines: Vec::new(),
             content_scroll: 0,
+            source,
         };
 
         app.build_file_tree().unwrap();
 
-        // Should include .md file and directory, but not .txt, .hidden, or bak
+        // Should include .md file and directory
         let names: Vec<_> = app.file_items.iter().map(|i| i.name.as_str()).collect();
         assert!(names.contains(&"note"));
         assert!(names.contains(&"subfolder"));
@@ -422,16 +376,20 @@ mod tests {
 
     #[test]
     fn expand_dir_inserts_children_with_correct_depth() {
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        let temp_path = temp_dir.path();
+        let root = PathBuf::from("/test");
+        let dir1 = root.join("dir1");
 
-        // Create nested structure
-        let subdir = temp_path.join("dir1");
-        fs::create_dir(&subdir).unwrap();
-        fs::write(subdir.join("child.md"), "content").unwrap();
+        let mut source = FakeGraphSource::new();
+        // Add dir1 as a directory under root
+        source.add_dir_entries(root.clone(), vec![(dir1.clone(), true, "")]);
+        // Add child.md under dir1
+        source.add_dir_entries(
+            dir1.clone(),
+            vec![(dir1.join("child.md"), false, "content")],
+        );
 
         let mut app = App {
-            graph_path: temp_path.to_path_buf(),
+            graph_path: root.clone(),
             focus: Focus::Browser,
             file_items: Vec::new(),
             browser_selected: 0,
@@ -439,6 +397,7 @@ mod tests {
             current_file: None,
             content_lines: Vec::new(),
             content_scroll: 0,
+            source,
         };
 
         app.build_file_tree().unwrap();
@@ -447,7 +406,7 @@ mod tests {
         assert_eq!(app.file_items[0].depth, 0);
 
         // Expand the directory
-        app.expand_dir(0, &subdir).unwrap();
+        app.expand_dir(0, &dir1).unwrap();
 
         // Should now have parent and child
         assert_eq!(app.file_items.len(), 2);

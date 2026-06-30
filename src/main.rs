@@ -9,6 +9,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use logseq_view::app::{App, Focus};
+use logseq_view::source::WalkdirGraphSource;
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 fn main() -> Result<()> {
@@ -65,7 +66,8 @@ fn event_loop(
     terminal: &mut ratatui::Terminal<CrosstermBackend<io::Stdout>>,
     graph_path: PathBuf,
 ) -> Result<()> {
-    let mut app = App::new(graph_path)?;
+    let source = WalkdirGraphSource::new();
+    let mut app = App::new(graph_path, source)?;
     let mut pending_g = false;
 
     loop {

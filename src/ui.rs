@@ -1,5 +1,6 @@
-use crate::app::{url_decode, App, Focus};
+use crate::app::{App, Focus};
 use crate::parser::{ParsedLine, Segment, TaskState};
+use crate::source::{url_decode, GraphSource};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -131,7 +132,7 @@ fn render_line(parsed: &ParsedLine) -> Line<'static> {
     Line::from(spans)
 }
 
-pub fn draw(f: &mut Frame, app: &mut App) {
+pub fn draw<S: GraphSource>(f: &mut Frame, app: &mut App<S>) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(1)])
@@ -147,7 +148,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_statusbar(f, app, chunks[1]);
 }
 
-fn draw_browser(f: &mut Frame, app: &mut App, area: Rect) {
+fn draw_browser<S: GraphSource>(f: &mut Frame, app: &mut App<S>, area: Rect) {
     let focused = app.focus == Focus::Browser;
     let border_style = if focused {
         Style::default().fg(Color::Cyan)
@@ -212,7 +213,7 @@ fn draw_browser(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(list, inner);
 }
 
-fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
+fn draw_content<S: GraphSource>(f: &mut Frame, app: &mut App<S>, area: Rect) {
     let focused = app.focus == Focus::Content;
     let border_style = if focused {
         Style::default().fg(Color::Cyan)
@@ -285,7 +286,7 @@ fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn draw_statusbar(f: &mut Frame, app: &App, area: Rect) {
+fn draw_statusbar<S: GraphSource>(f: &mut Frame, app: &App<S>, area: Rect) {
     let hints = match app.focus {
         Focus::Browser => {
             vec![
