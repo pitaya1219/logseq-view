@@ -79,7 +79,7 @@ fn event_loop(
         }
 
         if let Event::Key(key) = event::read()? {
-            let (action, next_pending_g) = map_key(app.focus, key, pending_g);
+            let (action, next_pending_g) = map_key(app.focus, key, pending_g, app.search_active);
             pending_g = next_pending_g;
 
             if let Some(action) = action {

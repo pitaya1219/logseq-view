@@ -28,6 +28,10 @@ lqview
 | `gg` | Top of content (Content) / top of current directory (Browser) |
 | `G` | Bottom of content (Content) / bottom of current directory (Browser) |
 | `PgUp`/`PgDn` | Page scroll |
+| `/` | Start in-page search |
+| `n` | Next search match |
+| `N` | Previous search match |
+| `Esc` | Cancel search |
 | `Tab` | Switch focus (browser ↔ content) |
 | `q` / `Ctrl+c` | Quit |
 

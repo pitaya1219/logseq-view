@@ -140,6 +140,32 @@ pub fn parse_file(content: &str) -> Vec<ParsedLine> {
     lines
 }
 
+/// Extract plain text from a ParsedLine's segments for search purposes.
+/// Concatenates the textual content of each segment, ignoring formatting.
+pub fn line_to_plain_text(line: &ParsedLine) -> String {
+    let mut text = String::new();
+    for segment in &line.segments {
+        match segment {
+            Segment::Plain(s) => text.push_str(s),
+            Segment::PageLink(s) => text.push_str(s),
+            Segment::Tag(s) => {
+                text.push('#');
+                text.push_str(s);
+            }
+            Segment::Bold(s) => text.push_str(s),
+            Segment::Italic(s) => text.push_str(s),
+            Segment::Code(s) => text.push_str(s),
+            Segment::BlockRef(s) => text.push_str(s),
+            Segment::Property(key, val) => {
+                text.push_str(key);
+                text.push_str(":: ");
+                text.push_str(val);
+            }
+        }
+    }
+    text
+}
+
 fn extract_task_state(s: &str) -> (Option<TaskState>, &str) {
     const STATES: &[(&str, TaskState)] = &[
         ("TODO ", TaskState::Todo),
@@ -671,5 +697,106 @@ mod tests {
             result[2].segments[0],
             Segment::Plain("Line two".to_string())
         );
+    }
+
+    // ============ line_to_plain_text tests ============
+
+    #[test]
+    fn test_line_to_plain_text_plain_only() {
+        let line = ParsedLine {
+            indent: 0,
+            is_bullet: false,
+            task: None,
+            segments: vec![Segment::Plain("Hello world".to_string())],
+        };
+        assert_eq!(line_to_plain_text(&line), "Hello world");
+    }
+
+    #[test]
+    fn test_line_to_plain_text_mixed_segments() {
+        let line = ParsedLine {
+            indent: 0,
+            is_bullet: false,
+            task: None,
+            segments: vec![
+                Segment::Plain("Check ".to_string()),
+                Segment::PageLink("my page".to_string()),
+                Segment::Plain(" here ".to_string()),
+                Segment::Tag("tag".to_string()),
+                Segment::Plain(" and ".to_string()),
+                Segment::Bold("bold".to_string()),
+            ],
+        };
+        assert_eq!(
+            line_to_plain_text(&line),
+            "Check my page here #tag and bold"
+        );
+    }
+
+    #[test]
+    fn test_line_to_plain_text_code_segment() {
+        let line = ParsedLine {
+            indent: 0,
+            is_bullet: false,
+            task: None,
+            segments: vec![
+                Segment::Plain("Use ".to_string()),
+                Segment::Code("code here".to_string()),
+                Segment::Plain(" in text".to_string()),
+            ],
+        };
+        assert_eq!(line_to_plain_text(&line), "Use code here in text");
+    }
+
+    #[test]
+    fn test_line_to_plain_text_property() {
+        let line = ParsedLine {
+            indent: 0,
+            is_bullet: false,
+            task: None,
+            segments: vec![Segment::Property("key".to_string(), "value".to_string())],
+        };
+        assert_eq!(line_to_plain_text(&line), "key:: value");
+    }
+
+    #[test]
+    fn test_line_to_plain_text_block_ref() {
+        let line = ParsedLine {
+            indent: 0,
+            is_bullet: false,
+            task: None,
+            segments: vec![
+                Segment::Plain("See ".to_string()),
+                Segment::BlockRef("block-id-123".to_string()),
+                Segment::Plain(" for details".to_string()),
+            ],
+        };
+        assert_eq!(line_to_plain_text(&line), "See block-id-123 for details");
+    }
+
+    #[test]
+    fn test_line_to_plain_text_empty() {
+        let line = ParsedLine {
+            indent: 0,
+            is_bullet: false,
+            task: None,
+            segments: vec![],
+        };
+        assert_eq!(line_to_plain_text(&line), "");
+    }
+
+    #[test]
+    fn test_line_to_plain_text_italic_and_bold() {
+        let line = ParsedLine {
+            indent: 0,
+            is_bullet: false,
+            task: None,
+            segments: vec![
+                Segment::Italic("italic".to_string()),
+                Segment::Plain(" and ".to_string()),
+                Segment::Bold("bold".to_string()),
+            ],
+        };
+        assert_eq!(line_to_plain_text(&line), "italic and bold");
     }
 }

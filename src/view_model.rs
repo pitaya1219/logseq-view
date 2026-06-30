@@ -42,6 +42,8 @@ pub struct ViewModel {
     pub browser: BrowserView,
     pub content: ContentView,
     pub focus: Focus,
+    pub search_active: bool,
+    pub search_query: String,
 }
 
 /// Build a ViewModel from the App state and visible heights.
@@ -61,6 +63,8 @@ pub fn build_view_model<S: GraphSource>(
         browser: browser_view,
         content: content_view,
         focus: app.focus,
+        search_active: app.search_active,
+        search_query: app.search_query.clone(),
     }
 }
 

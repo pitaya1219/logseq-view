@@ -269,7 +269,7 @@ fn draw_content(f: &mut Frame, vm: &ViewModel, area: Rect) {
 }
 
 fn draw_statusbar(f: &mut Frame, vm: &ViewModel, area: Rect) {
-    let hints = match vm.focus {
+    let mut hints = match vm.focus {
         Focus::Browser => {
             vec![
                 Span::styled(
@@ -311,6 +311,20 @@ fn draw_statusbar(f: &mut Frame, vm: &ViewModel, area: Rect) {
             ]
         }
     };
+
+    // If search is active, prepend the search prompt
+    if vm.search_active {
+        hints.insert(
+            0,
+            Span::styled(
+                format!("/{}", vm.search_query),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        );
+    }
 
     let bar = Paragraph::new(Line::from(hints)).style(Style::default().bg(Color::Reset));
     f.render_widget(bar, area);

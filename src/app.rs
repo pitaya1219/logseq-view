@@ -1,5 +1,5 @@
 use crate::action::Action;
-use crate::parser::{parse_file, ParsedLine};
+use crate::parser::{line_to_plain_text, parse_file, ParsedLine};
 use crate::source::{Entry, GraphSource};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -33,6 +33,11 @@ pub struct App<S: GraphSource> {
     pub content_lines: Vec<ParsedLine>,
     pub content_scroll: usize,
 
+    // search state
+    pub search_active: bool,
+    pub search_query: String,
+    pub search_saved_scroll: usize,
+
     // GraphSource instance
     source: S,
 }
@@ -48,6 +53,9 @@ impl<S: GraphSource> App<S> {
             current_file: None,
             content_lines: Vec::new(),
             content_scroll: 0,
+            search_active: false,
+            search_query: String::new(),
+            search_saved_scroll: 0,
             source,
         };
         app.build_file_tree()?;
@@ -175,6 +183,35 @@ impl<S: GraphSource> App<S> {
                 self.browser_bottom();
                 Ok(false)
             }
+            // Search actions
+            Action::SearchStart => {
+                self.search_start();
+                Ok(false)
+            }
+            Action::SearchInput(c) => {
+                self.search_input(c);
+                Ok(false)
+            }
+            Action::SearchBackspace => {
+                self.search_backspace();
+                Ok(false)
+            }
+            Action::SearchCommit => {
+                self.search_commit();
+                Ok(false)
+            }
+            Action::SearchCancel => {
+                self.search_cancel();
+                Ok(false)
+            }
+            Action::SearchNext => {
+                self.search_next();
+                Ok(false)
+            }
+            Action::SearchPrev => {
+                self.search_prev();
+                Ok(false)
+            }
         }
     }
 
@@ -300,6 +337,163 @@ impl<S: GraphSource> App<S> {
         end
     }
 
+    // --- Search methods ---
+
+    /// Start a new search, saving the current scroll position
+    pub(crate) fn search_start(&mut self) {
+        if self.focus == Focus::Content && self.current_file.is_some() {
+            self.search_active = true;
+            self.search_query.clear();
+            self.search_saved_scroll = self.content_scroll;
+        }
+    }
+
+    /// Add a character to the search query
+    pub(crate) fn search_input(&mut self, c: char) {
+        if self.search_active {
+            self.search_query.push(c);
+        }
+    }
+
+    /// Remove the last character from the search query
+    pub(crate) fn search_backspace(&mut self) {
+        if self.search_active {
+            self.search_query.pop();
+        }
+    }
+
+    /// Commit the search - find the first matching line and scroll to it
+    pub(crate) fn search_commit(&mut self) {
+        if !self.search_active || self.search_query.is_empty() {
+            self.search_cancel();
+            return;
+        }
+
+        if let Some(matching_line) = self.find_next_match(self.content_scroll, true) {
+            self.content_scroll = matching_line;
+            self.search_active = false;
+        }
+        // If no match found, stay in search mode
+    }
+
+    /// Cancel search and restore the saved scroll position
+    pub(crate) fn search_cancel(&mut self) {
+        self.search_active = false;
+        self.search_query.clear();
+        self.content_scroll = self.search_saved_scroll;
+    }
+
+    /// Find the next matching line (wrapping around)
+    pub(crate) fn search_next(&mut self) {
+        if !self.search_active && self.search_query.is_empty() {
+            return;
+        }
+
+        let start_pos = if self.search_active {
+            // In search mode, start from current scroll position
+            self.content_scroll
+        } else {
+            // After commit, start from current scroll position + 1
+            self.content_scroll + 1
+        };
+
+        if let Some(matching_line) = self.find_next_match(start_pos, false) {
+            self.content_scroll = matching_line;
+            if self.search_active {
+                // In search mode, commit implicitly by exiting search mode
+                self.search_active = false;
+            }
+        }
+    }
+
+    /// Find the previous matching line (wrapping around)
+    pub(crate) fn search_prev(&mut self) {
+        if !self.search_active && self.search_query.is_empty() {
+            return;
+        }
+
+        let start_pos = if self.search_active {
+            // In search mode, start from current scroll position
+            self.content_scroll
+        } else {
+            // After commit, start from current scroll position
+            self.content_scroll
+        };
+
+        if let Some(matching_line) = self.find_prev_match(start_pos, false) {
+            self.content_scroll = matching_line;
+            if self.search_active {
+                // In search mode, commit implicitly by exiting search mode
+                self.search_active = false;
+            }
+        }
+    }
+
+    /// Find the next line that matches the search query, starting from start_pos
+    /// If wrap is true and no match found after end, search from beginning
+    fn find_next_match(&self, start_pos: usize, wrap: bool) -> Option<usize> {
+        if self.search_query.is_empty() || self.content_lines.is_empty() {
+            return None;
+        }
+
+        let query = self.search_query.to_lowercase();
+        let total_lines = self.content_lines.len();
+
+        // Search from start_pos to end
+        for i in start_pos..total_lines {
+            let line_text = line_to_plain_text(&self.content_lines[i]).to_lowercase();
+            if line_text.contains(&query) {
+                return Some(i);
+            }
+        }
+
+        // Search from beginning to start_pos (excluding start_pos)
+        if wrap {
+            for i in 0..start_pos {
+                let line_text = line_to_plain_text(&self.content_lines[i]).to_lowercase();
+                if line_text.contains(&query) {
+                    return Some(i);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Find the previous line that matches the search query, starting from start_pos
+    /// If wrap is true and no match found before 0, search from end
+    fn find_prev_match(&self, start_pos: usize, wrap: bool) -> Option<usize> {
+        if self.search_query.is_empty() || self.content_lines.is_empty() {
+            return None;
+        }
+
+        let query = self.search_query.to_lowercase();
+        let total_lines = self.content_lines.len();
+
+        // Search backwards from start_pos to 0 (excluding start_pos)
+        // We need to go in reverse order: start_pos-1, start_pos-2, ..., 0
+        if start_pos > 0 {
+            for i in (0..start_pos).rev() {
+                let line_text = line_to_plain_text(&self.content_lines[i]).to_lowercase();
+                if line_text.contains(&query) {
+                    return Some(i);
+                }
+            }
+        }
+
+        // Search from end to start_pos
+        if wrap {
+            for i in (start_pos..total_lines).rev() {
+                let line_text = line_to_plain_text(&self.content_lines[i]).to_lowercase();
+                if line_text.contains(&query) {
+                    return Some(i);
+                }
+            }
+        }
+
+        None
+    }
+
     // Adjusts browser_offset so that browser_selected stays within the visible window.
     pub(crate) fn clamp_browser_scroll(&mut self, visible_height: usize) {
         if self.browser_selected < self.browser_offset {
@@ -338,6 +532,7 @@ fn make_file_item_from_entry(entry: Entry, depth: usize) -> FileItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::Segment;
     use crate::source::{url_decode, FakeGraphSource};
     use std::path::PathBuf;
 
@@ -351,6 +546,9 @@ mod tests {
             current_file: None,
             content_lines: Vec::new(),
             content_scroll: 0,
+            search_active: false,
+            search_query: String::new(),
+            search_saved_scroll: 0,
             source: FakeGraphSource::new(),
         }
     }
@@ -478,6 +676,9 @@ mod tests {
             current_file: None,
             content_lines: Vec::new(),
             content_scroll: 0,
+            search_active: false,
+            search_query: String::new(),
+            search_saved_scroll: 0,
             source,
         };
 
@@ -515,6 +716,9 @@ mod tests {
             current_file: None,
             content_lines: Vec::new(),
             content_scroll: 0,
+            search_active: false,
+            search_query: String::new(),
+            search_saved_scroll: 0,
             source,
         };
 
@@ -971,5 +1175,368 @@ mod tests {
         // subtree of subdir is [2, 5) = [2, 3, 4]
         // last item in subdir's subtree is at index 4 (child3)
         assert_eq!(app.browser_selected, 4);
+    }
+
+    // --- Search tests ---
+
+    #[test]
+    fn search_start_in_content_focus_activates_search() {
+        let mut app = make_app();
+        app.focus = Focus::Content;
+        app.current_file = Some(PathBuf::from("/test/file.md"));
+
+        let should_quit = app.update(Action::SearchStart).unwrap();
+        assert!(!should_quit);
+        assert!(app.search_active);
+        assert!(app.search_query.is_empty());
+    }
+
+    #[test]
+    fn search_start_in_browser_focus_no_op() {
+        let mut app = make_app();
+        app.focus = Focus::Browser;
+
+        let should_quit = app.update(Action::SearchStart).unwrap();
+        assert!(!should_quit);
+        assert!(!app.search_active);
+    }
+
+    #[test]
+    fn search_input_adds_char() {
+        let mut app = make_app();
+        app.search_active = true;
+
+        let should_quit = app.update(Action::SearchInput('t')).unwrap();
+        assert!(!should_quit);
+        assert!(app.search_active);
+        assert_eq!(app.search_query, "t");
+
+        let should_quit = app.update(Action::SearchInput('e')).unwrap();
+        assert!(!should_quit);
+        assert_eq!(app.search_query, "te");
+    }
+
+    #[test]
+    fn search_input_when_not_active_no_op() {
+        let mut app = make_app();
+        app.search_active = false;
+
+        let should_quit = app.update(Action::SearchInput('t')).unwrap();
+        assert!(!should_quit);
+        assert!(!app.search_active);
+        assert!(app.search_query.is_empty());
+    }
+
+    #[test]
+    fn search_backspace_removes_char() {
+        let mut app = make_app();
+        app.search_active = true;
+        app.search_query = "test".to_string();
+
+        let should_quit = app.update(Action::SearchBackspace).unwrap();
+        assert!(!should_quit);
+        assert_eq!(app.search_query, "tes");
+
+        let should_quit = app.update(Action::SearchBackspace).unwrap();
+        assert!(!should_quit);
+        assert_eq!(app.search_query, "te");
+    }
+
+    #[test]
+    fn search_backspace_empty_query_no_op() {
+        let mut app = make_app();
+        app.search_active = true;
+        app.search_query = "t".to_string();
+
+        let should_quit = app.update(Action::SearchBackspace).unwrap();
+        assert!(!should_quit);
+        assert_eq!(app.search_query, "");
+
+        // Backspace on empty query should do nothing
+        let should_quit = app.update(Action::SearchBackspace).unwrap();
+        assert!(!should_quit);
+        assert_eq!(app.search_query, "");
+    }
+
+    #[test]
+    fn search_cancel_restore_scroll() {
+        let mut app = make_app();
+        app.focus = Focus::Content;
+        app.current_file = Some(PathBuf::from("/test/file.md"));
+        app.content_lines = dummy_lines(10);
+        app.content_scroll = 5;
+
+        // Start search
+        app.update(Action::SearchStart).unwrap();
+        assert_eq!(app.search_saved_scroll, 5);
+
+        // Change scroll
+        app.content_scroll = 7;
+
+        // Cancel search
+        let should_quit = app.update(Action::SearchCancel).unwrap();
+        assert!(!should_quit);
+        assert!(!app.search_active);
+        assert!(app.search_query.is_empty());
+        assert_eq!(app.content_scroll, 5); // Restored to saved position
+    }
+
+    #[test]
+    fn search_commit_finds_match() {
+        let mut app = make_app();
+        app.focus = Focus::Content;
+        app.current_file = Some(PathBuf::from("/test/file.md"));
+
+        // Create content with searchable text
+        app.content_lines = vec![
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("first line".to_string())],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("target line".to_string())],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("another line".to_string())],
+            },
+        ];
+        app.content_scroll = 0;
+
+        // Start search and type query
+        app.update(Action::SearchStart).unwrap();
+        app.update(Action::SearchInput('t')).unwrap();
+        app.update(Action::SearchInput('a')).unwrap();
+        app.update(Action::SearchInput('r')).unwrap();
+
+        // Commit search
+        let should_quit = app.update(Action::SearchCommit).unwrap();
+        assert!(!should_quit);
+        assert!(!app.search_active);
+        assert_eq!(app.search_query, "tar");
+        assert_eq!(app.content_scroll, 1); // Should scroll to line 1 ("target line")
+    }
+
+    #[test]
+    fn search_commit_no_match_stays_in_search() {
+        let mut app = make_app();
+        app.focus = Focus::Content;
+        app.current_file = Some(PathBuf::from("/test/file.md"));
+
+        // Create content with searchable text
+        app.content_lines = vec![
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("first line".to_string())],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("another line".to_string())],
+            },
+        ];
+        app.content_scroll = 0;
+
+        // Start search and type query that won't match
+        app.update(Action::SearchStart).unwrap();
+        app.update(Action::SearchInput('z')).unwrap();
+        app.update(Action::SearchInput('z')).unwrap();
+
+        // Commit search - should stay in search mode since no match
+        let should_quit = app.update(Action::SearchCommit).unwrap();
+        assert!(!should_quit);
+        assert!(app.search_active); // Still in search mode
+        assert_eq!(app.search_query, "zz");
+    }
+
+    #[test]
+    fn search_next_finds_next_match() {
+        let mut app = make_app();
+        app.focus = Focus::Content;
+        app.current_file = Some(PathBuf::from("/test/file.md"));
+
+        // Create content with multiple matching lines
+        app.content_lines = vec![
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("target line 1".to_string())],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("other line".to_string())],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("target line 2".to_string())],
+            },
+        ];
+        app.content_scroll = 0;
+
+        // Start search and commit
+        app.update(Action::SearchStart).unwrap();
+        app.update(Action::SearchInput('t')).unwrap();
+        app.update(Action::SearchInput('a')).unwrap();
+        app.update(Action::SearchCommit).unwrap();
+
+        assert_eq!(app.content_scroll, 0); // First match at line 0
+
+        // Search next
+        let should_quit = app.update(Action::SearchNext).unwrap();
+        assert!(!should_quit);
+        assert_eq!(app.content_scroll, 2); // Next match at line 2
+    }
+
+    #[test]
+    fn search_prev_finds_previous_match() {
+        let mut app = make_app();
+        app.focus = Focus::Content;
+        app.current_file = Some(PathBuf::from("/test/file.md"));
+
+        // Create content with multiple matching lines
+        app.content_lines = vec![
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("target line 1".to_string())],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("other line".to_string())],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("target line 2".to_string())],
+            },
+        ];
+        app.content_scroll = 2; // Start at line 2
+
+        // Start search and commit
+        app.update(Action::SearchStart).unwrap();
+        app.update(Action::SearchInput('t')).unwrap();
+        app.update(Action::SearchInput('a')).unwrap();
+        app.update(Action::SearchCommit).unwrap();
+
+        // Since we're at line 2 which matches, commit keeps us there
+        assert_eq!(app.content_scroll, 2);
+
+        // Search prev
+        let should_quit = app.update(Action::SearchPrev).unwrap();
+        assert!(!should_quit);
+        assert_eq!(app.content_scroll, 0); // Previous match at line 0
+    }
+
+    #[test]
+    fn search_next_no_active_query_no_op() {
+        let mut app = make_app();
+        app.content_scroll = 0;
+
+        let should_quit = app.update(Action::SearchNext).unwrap();
+        assert!(!should_quit);
+        assert_eq!(app.content_scroll, 0); // No change
+    }
+
+    #[test]
+    fn search_prev_no_active_query_no_op() {
+        let mut app = make_app();
+        app.content_scroll = 5;
+
+        let should_quit = app.update(Action::SearchPrev).unwrap();
+        assert!(!should_quit);
+        assert_eq!(app.content_scroll, 5); // No change
+    }
+
+    #[test]
+    fn search_case_insensitive() {
+        let mut app = make_app();
+        app.focus = Focus::Content;
+        app.current_file = Some(PathBuf::from("/test/file.md"));
+
+        // Create content with mixed case
+        app.content_lines = vec![
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("UPPER CASE TARGET".to_string())],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("lower case line".to_string())],
+            },
+        ];
+        app.content_scroll = 0;
+
+        // Search with lowercase query
+        app.update(Action::SearchStart).unwrap();
+        app.update(Action::SearchInput('t')).unwrap();
+        app.update(Action::SearchInput('a')).unwrap();
+        app.update(Action::SearchInput('r')).unwrap();
+
+        let should_quit = app.update(Action::SearchCommit).unwrap();
+        assert!(!should_quit);
+        assert_eq!(app.content_scroll, 0); // Should find "UPPER CASE TARGET"
+    }
+
+    #[test]
+    fn search_with_mixed_segments() {
+        use Segment;
+        let mut app = make_app();
+        app.focus = Focus::Content;
+        app.current_file = Some(PathBuf::from("/test/file.md"));
+
+        // Create content with mixed segments
+        app.content_lines = vec![
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![
+                    Segment::Plain("Check ".to_string()),
+                    Segment::PageLink("my page".to_string()),
+                    Segment::Plain(" here".to_string()),
+                ],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("other line".to_string())],
+            },
+        ];
+        app.content_scroll = 0;
+
+        // Search for "page" which is inside a PageLink segment
+        app.update(Action::SearchStart).unwrap();
+        app.update(Action::SearchInput('p')).unwrap();
+        app.update(Action::SearchInput('a')).unwrap();
+        app.update(Action::SearchInput('g')).unwrap();
+        app.update(Action::SearchInput('e')).unwrap();
+
+        let should_quit = app.update(Action::SearchCommit).unwrap();
+        assert!(!should_quit);
+        assert_eq!(app.content_scroll, 0); // Should find line with PageLink containing "my page"
     }
 }
