@@ -2,6 +2,11 @@
 name = "logseq-view"
 version = "0.1.0"
 edition = "2021"
+description = "TUI viewer for Logseq markdown files"
+license = "MIT"
+repository = "https://github.com/pitaya1219/logseq-view"
+keywords = ["logseq", "tui", "markdown", "ratatui"]
+categories = ["command-line-utilities"]
 
 [[bin]]
 name = "lqview"
