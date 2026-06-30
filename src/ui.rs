@@ -1,9 +1,10 @@
 use crate::app::Focus;
 use crate::parser::{ParsedLine, Segment, TaskState};
 use crate::source::GraphSource;
-use crate::view_model::ViewModel;
+use crate::view_model::{LineHighlight, ViewModel};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Margin, Rect},
+    prelude::Stylize,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
@@ -244,7 +245,40 @@ fn draw_content(f: &mut Frame, vm: &ViewModel, area: Rect) {
         return;
     }
 
-    let lines: Vec<Line> = vm.content.visible_lines.iter().map(render_line).collect();
+    // Build styled lines with search highlighting
+    let lines: Vec<Line> = vm
+        .content
+        .visible_lines
+        .iter()
+        .zip(vm.content.line_highlights.iter())
+        .map(|(line, highlight)| {
+            let base_line = render_line(line);
+            // Apply background highlight to the entire line based on search state
+            match highlight {
+                LineHighlight::Current => {
+                    // Current match: yellow background
+                    Line::from(
+                        base_line
+                            .spans
+                            .into_iter()
+                            .map(|span| span.bg(Color::Yellow).fg(Color::Black))
+                            .collect::<Vec<_>>(),
+                    )
+                }
+                LineHighlight::Match => {
+                    // Other matches: dark blue background
+                    Line::from(
+                        base_line
+                            .spans
+                            .into_iter()
+                            .map(|span| span.bg(Color::DarkGray))
+                            .collect::<Vec<_>>(),
+                    )
+                }
+                LineHighlight::None => base_line,
+            }
+        })
+        .collect();
 
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
     f.render_widget(paragraph, inner);
@@ -312,18 +346,40 @@ fn draw_statusbar(f: &mut Frame, vm: &ViewModel, area: Rect) {
         }
     };
 
-    // If search is active, prepend the search prompt
-    if vm.search_active {
-        hints.insert(
-            0,
+    // If search query is non-empty, prepend the search prompt with hit count
+    if !vm.search_query.is_empty() {
+        let counter = if vm.content.match_count > 0 {
+            if let Some(current) = vm.content.current_match {
+                format!(" [{}/{}]", current, vm.content.match_count)
+            } else {
+                // Current scroll position is not a match
+                format!(" [-/{}]", vm.content.match_count)
+            }
+        } else {
+            " [no matches]".to_string()
+        };
+
+        let search_span = if vm.search_active {
+            // In search mode: yellow background
             Span::styled(
                 format!("/{}", vm.search_query),
                 Style::default()
                     .fg(Color::Black)
                     .bg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
-            ),
-        );
+            )
+        } else {
+            // After commit: less prominent
+            Span::styled(
+                format!("/{}", vm.search_query),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+        };
+
+        hints.insert(0, search_span);
+        hints.insert(1, Span::raw(counter));
     }
 
     let bar = Paragraph::new(Line::from(hints)).style(Style::default().bg(Color::Reset));

@@ -28,7 +28,7 @@ lqview
 | `gg` | Top of content (Content) / top of current directory (Browser) |
 | `G` | Bottom of content (Content) / bottom of current directory (Browser) |
 | `PgUp`/`PgDn` | Page scroll |
-| `/` | Start in-page search |
+| `/` | Start in-page search (shows match count) |
 | `n` | Next search match |
 | `N` | Previous search match |
 | `Esc` | Cancel search |

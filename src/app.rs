@@ -494,6 +494,48 @@ impl<S: GraphSource> App<S> {
         None
     }
 
+    /// Returns a vector of all line indices that match the current search query.
+    /// Case-insensitive matching using line_to_plain_text.
+    pub fn match_line_indices(&self) -> Vec<usize> {
+        if self.search_query.is_empty() || self.content_lines.is_empty() {
+            return Vec::new();
+        }
+
+        let query = self.search_query.to_lowercase();
+        self.content_lines
+            .iter()
+            .enumerate()
+            .filter_map(|(i, line)| {
+                let line_text = line_to_plain_text(line).to_lowercase();
+                if line_text.contains(&query) {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Returns the total number of matching lines for the current search query
+    pub fn match_count(&self) -> usize {
+        self.match_line_indices().len()
+    }
+
+    /// Returns the 1-based position of the current match (line at content_scroll)
+    /// among all matching lines. Returns None if the current line is not a match
+    /// or if there are no matches.
+    pub fn current_match_position(&self) -> Option<usize> {
+        let matches = self.match_line_indices();
+        if matches.is_empty() {
+            return None;
+        }
+        // Find the position of content_scroll in the matches list
+        matches
+            .iter()
+            .position(|&idx| idx == self.content_scroll)
+            .map(|pos| pos + 1) // Convert to 1-based
+    }
+
     // Adjusts browser_offset so that browser_selected stays within the visible window.
     pub(crate) fn clamp_browser_scroll(&mut self, visible_height: usize) {
         if self.browser_selected < self.browser_offset {
@@ -1538,5 +1580,236 @@ mod tests {
         let should_quit = app.update(Action::SearchCommit).unwrap();
         assert!(!should_quit);
         assert_eq!(app.content_scroll, 0); // Should find line with PageLink containing "my page"
+    }
+
+    // --- match_line_indices tests ---
+
+    #[test]
+    fn match_line_indices_empty_query() {
+        let mut app = make_app();
+        app.content_lines = vec![ParsedLine {
+            indent: 0,
+            is_bullet: false,
+            task: None,
+            segments: vec![Segment::Plain("test line".to_string())],
+        }];
+        app.search_query = String::new();
+
+        let matches = app.match_line_indices();
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn match_line_indices_empty_content() {
+        let mut app = make_app();
+        app.search_query = "test".to_string();
+
+        let matches = app.match_line_indices();
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn match_line_indices_single_match() {
+        let mut app = make_app();
+        app.content_lines = vec![
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("first line".to_string())],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("target line".to_string())],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("other line".to_string())],
+            },
+        ];
+        app.search_query = "target".to_string();
+
+        let matches = app.match_line_indices();
+        assert_eq!(matches, vec![1]);
+    }
+
+    #[test]
+    fn match_line_indices_multiple_matches() {
+        let mut app = make_app();
+        app.content_lines = vec![
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("target line 1".to_string())],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("other line".to_string())],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("target line 2".to_string())],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("target line 3".to_string())],
+            },
+        ];
+        app.search_query = "target".to_string();
+
+        let matches = app.match_line_indices();
+        assert_eq!(matches, vec![0, 2, 3]);
+    }
+
+    #[test]
+    fn match_line_indices_case_insensitive() {
+        let mut app = make_app();
+        app.content_lines = vec![
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("UPPER CASE".to_string())],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("lower case".to_string())],
+            },
+        ];
+        app.search_query = "case".to_string();
+
+        let matches = app.match_line_indices();
+        assert_eq!(matches, vec![0, 1]);
+    }
+
+    #[test]
+    fn match_count_correct() {
+        let mut app = make_app();
+        app.content_lines = vec![
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("match 1".to_string())],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("no match here".to_string())],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("match 2".to_string())],
+            },
+        ];
+        app.search_query = "match".to_string();
+
+        // "match" appears in "match 1", "no match here", and "match 2" - 3 matches
+        assert_eq!(app.match_count(), 3);
+    }
+
+    #[test]
+    fn current_match_position_when_on_match() {
+        let mut app = make_app();
+        app.content_lines = vec![
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("match 1".to_string())],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("match 2".to_string())],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("match 3".to_string())],
+            },
+        ];
+        app.search_query = "match".to_string();
+
+        // Position at first match
+        app.content_scroll = 0;
+        assert_eq!(app.current_match_position(), Some(1));
+
+        // Position at second match
+        app.content_scroll = 1;
+        assert_eq!(app.current_match_position(), Some(2));
+
+        // Position at third match
+        app.content_scroll = 2;
+        assert_eq!(app.current_match_position(), Some(3));
+    }
+
+    #[test]
+    fn current_match_position_when_not_on_match() {
+        let mut app = make_app();
+        app.content_lines = vec![
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("match 1".to_string())],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("no match".to_string())],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("match 2".to_string())],
+            },
+        ];
+        app.search_query = "match".to_string();
+
+        // Position at line 1 which contains "no match" - this IS a match for "match"
+        // So current_match_position should be Some(2) (second match in 1-based)
+        app.content_scroll = 1;
+        assert_eq!(app.current_match_position(), Some(2));
+
+        // Position at a line that doesn't match at all
+        app.search_query = "xyz".to_string();
+        app.content_scroll = 1;
+        assert_eq!(app.current_match_position(), None);
+    }
+
+    #[test]
+    fn current_match_position_no_matches() {
+        let mut app = make_app();
+        app.content_lines = vec![ParsedLine {
+            indent: 0,
+            is_bullet: false,
+            task: None,
+            segments: vec![Segment::Plain("no match".to_string())],
+        }];
+        app.search_query = "zzz".to_string();
+
+        app.content_scroll = 0;
+        assert_eq!(app.current_match_position(), None);
     }
 }
