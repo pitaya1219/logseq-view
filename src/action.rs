@@ -3,7 +3,13 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::app::Focus;
 
 /// Handle key mapping when in search input mode (Content focus only)
-fn map_key_search(code: KeyCode, _modifiers: KeyModifiers) -> (Option<Action>, bool) {
+fn map_key_search(code: KeyCode, modifiers: KeyModifiers) -> (Option<Action>, bool) {
+    // Ctrl-C still quits even while typing a search query.
+    if let KeyCode::Char('c') = code {
+        if modifiers.contains(KeyModifiers::CONTROL) {
+            return (Some(Action::Quit), false);
+        }
+    }
     match code {
         KeyCode::Enter => (Some(Action::SearchCommit), false),
         KeyCode::Esc => (Some(Action::SearchCancel), false),
@@ -48,7 +54,8 @@ pub enum Action {
 /// Returns (Option<Action>, next_pending_g)
 ///
 /// Encodes the current key behavior:
-/// - `q` and `Ctrl-C` -> Quit (in any focus)
+/// - `q` and `Ctrl-C` -> Quit (except in Content search-input mode, where `q` is
+///   inserted into the query; `Ctrl-C` still quits)
 /// - Browser: Tab->ToggleFocus, Down/j->BrowserDown, Up/k->BrowserUp,
 ///   Enter/l->OpenSelected, h->CollapseOrParent,
 ///   G->BrowserBottom, g-> if pending_g then BrowserTop else set next pending_g=true
@@ -69,7 +76,14 @@ pub fn map_key(
         code, modifiers, ..
     } = key;
 
-    // Handle quit keys first (applies to all focus modes)
+    // In Content search-input mode, route keys to search handling FIRST, so that
+    // printable characters (including `q`) are inserted into the query instead of
+    // triggering the global quit. (Ctrl-C still quits, handled inside map_key_search.)
+    if focus == Focus::Content && search_active {
+        return map_key_search(code, modifiers);
+    }
+
+    // Handle quit keys (applies to all non-search-input modes)
     if let KeyCode::Char('q') = code {
         return (Some(Action::Quit), false);
     }
@@ -77,11 +91,6 @@ pub fn map_key(
         if modifiers.contains(KeyModifiers::CONTROL) {
             return (Some(Action::Quit), false);
         }
-    }
-
-    // Handle search mode in Content focus
-    if focus == Focus::Content && search_active {
-        return map_key_search(code, modifiers);
     }
 
     let action = match focus {
@@ -441,6 +450,22 @@ mod tests {
         // Search mode should only affect Content focus
         let (action, pending) = map_key(Focus::Browser, key(KeyCode::Char('a')), false, true);
         assert_eq!(action, None);
+        assert!(!pending);
+    }
+
+    #[test]
+    fn search_mode_q_is_input_not_quit() {
+        // While typing a query, `q` must be inserted, not quit the app.
+        let (action, pending) = map_key(Focus::Content, key(KeyCode::Char('q')), false, true);
+        assert_eq!(action, Some(Action::SearchInput('q')));
+        assert!(!pending);
+    }
+
+    #[test]
+    fn search_mode_ctrl_c_still_quits() {
+        // Ctrl-C remains an escape hatch even in search-input mode.
+        let (action, pending) = map_key(Focus::Content, ctrl_key('c'), false, true);
+        assert_eq!(action, Some(Action::Quit));
         assert!(!pending);
     }
 }
