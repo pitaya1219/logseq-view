@@ -4,11 +4,12 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, Event},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use logseq_view::app::{App, Focus};
+use logseq_view::action::map_key;
+use logseq_view::app::App;
 use logseq_view::source::WalkdirGraphSource;
 use ratatui::{backend::CrosstermBackend, Terminal};
 
@@ -78,43 +79,13 @@ fn event_loop(
         }
 
         if let Event::Key(key) = event::read()? {
-            let was_pending_g = pending_g;
-            pending_g = false;
+            let (action, next_pending_g) = map_key(app.focus, key, pending_g);
+            pending_g = next_pending_g;
 
-            // Handle quit keys first (applies to all focus modes)
-            match key.code {
-                KeyCode::Char('q') => break,
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
-                _ => {
-                    // Dispatch to focus-specific handling
-                    match app.focus {
-                        Focus::Browser => match key.code {
-                            KeyCode::Tab => app.toggle_focus(),
-                            KeyCode::Down | KeyCode::Char('j') => app.browser_down(),
-                            KeyCode::Up | KeyCode::Char('k') => app.browser_up(),
-                            KeyCode::Enter | KeyCode::Char('l') => {
-                                app.open_selected()?;
-                            }
-                            KeyCode::Char('h') => app.collapse_or_jump_parent(),
-                            _ => {}
-                        },
-                        Focus::Content => match key.code {
-                            KeyCode::Tab | KeyCode::Char('h') => app.toggle_focus(),
-                            KeyCode::Down | KeyCode::Char('j') => app.content_down(1),
-                            KeyCode::Up | KeyCode::Char('k') => app.content_up(1),
-                            KeyCode::PageDown => app.content_down(20),
-                            KeyCode::PageUp => app.content_up(20),
-                            KeyCode::Char('G') => app.content_bottom(),
-                            KeyCode::Char('g') => {
-                                if was_pending_g {
-                                    app.content_top();
-                                } else {
-                                    pending_g = true;
-                                }
-                            }
-                            _ => {}
-                        },
-                    }
+            if let Some(action) = action {
+                let should_quit = app.update(action)?;
+                if should_quit {
+                    break;
                 }
             }
         }

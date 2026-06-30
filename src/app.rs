@@ -1,3 +1,4 @@
+use crate::action::Action;
 use crate::parser::{parse_file, ParsedLine};
 use crate::source::{Entry, GraphSource};
 use anyhow::Result;
@@ -53,7 +54,7 @@ impl<S: GraphSource> App<S> {
         Ok(app)
     }
 
-    pub fn build_file_tree(&mut self) -> Result<()> {
+    pub(crate) fn build_file_tree(&mut self) -> Result<()> {
         self.file_items.clear();
 
         // Load only immediate children of the graph root; expand on demand
@@ -66,7 +67,7 @@ impl<S: GraphSource> App<S> {
         Ok(())
     }
 
-    pub fn open_selected(&mut self) -> Result<()> {
+    pub(crate) fn open_selected(&mut self) -> Result<()> {
         let Some(item) = self.file_items.get(self.browser_selected) else {
             return Ok(());
         };
@@ -95,7 +96,7 @@ impl<S: GraphSource> App<S> {
         Ok(())
     }
 
-    fn collapse_dir(&mut self, idx: usize) {
+    pub(crate) fn collapse_dir(&mut self, idx: usize) {
         let depth = self.file_items[idx].depth;
         let mut end = idx + 1;
         while end < self.file_items.len() && self.file_items[end].depth > depth {
@@ -104,7 +105,7 @@ impl<S: GraphSource> App<S> {
         self.file_items.drain(idx + 1..end);
     }
 
-    fn expand_dir(&mut self, parent_idx: usize, dir: &Path) -> Result<()> {
+    pub(crate) fn expand_dir(&mut self, parent_idx: usize, dir: &Path) -> Result<()> {
         let parent_depth = self.file_items[parent_idx].depth;
         let entries = self.source.children(dir)?;
 
@@ -117,7 +118,7 @@ impl<S: GraphSource> App<S> {
         Ok(())
     }
 
-    pub fn load_file(&mut self, path: &Path) -> Result<()> {
+    pub(crate) fn load_file(&mut self, path: &Path) -> Result<()> {
         let content = self.source.read(path)?;
         self.content_lines = parse_file(&content);
         self.current_file = Some(path.to_path_buf());
@@ -125,9 +126,53 @@ impl<S: GraphSource> App<S> {
         Ok(())
     }
 
+    /// Main update function that handles all actions.
+    /// Returns Ok(true) if the application should quit, Ok(false) otherwise.
+    pub fn update(&mut self, action: Action) -> Result<bool> {
+        match action {
+            Action::Quit => Ok(true),
+            Action::ToggleFocus => {
+                self.toggle_focus();
+                Ok(false)
+            }
+            Action::BrowserUp => {
+                self.browser_up();
+                Ok(false)
+            }
+            Action::BrowserDown => {
+                self.browser_down();
+                Ok(false)
+            }
+            Action::OpenSelected => {
+                self.open_selected()?;
+                Ok(false)
+            }
+            Action::CollapseOrParent => {
+                self.collapse_or_jump_parent();
+                Ok(false)
+            }
+            Action::ContentUp(amount) => {
+                self.content_up(amount);
+                Ok(false)
+            }
+            Action::ContentDown(amount) => {
+                self.content_down(amount);
+                Ok(false)
+            }
+            Action::ContentTop => {
+                self.content_top();
+                Ok(false)
+            }
+            Action::ContentBottom => {
+                self.content_bottom();
+                Ok(false)
+            }
+        }
+    }
+
     // --- Navigation ---
 
-    pub fn collapse_or_jump_parent(&mut self) {
+    pub(crate) fn collapse_or_jump_parent(&mut self) {
         let Some(item) = self.file_items.get(self.browser_selected) else {
             return;
         };
@@ -153,32 +198,32 @@ impl<S: GraphSource> App<S> {
         }
     }
 
-    pub fn browser_down(&mut self) {
+    pub(crate) fn browser_down(&mut self) {
         if self.browser_selected + 1 < self.file_items.len() {
             self.browser_selected += 1;
         }
     }
 
-    pub fn browser_up(&mut self) {
+    pub(crate) fn browser_up(&mut self) {
         if self.browser_selected > 0 {
             self.browser_selected -= 1;
         }
     }
 
-    pub fn content_down(&mut self, amount: usize) {
+    pub(crate) fn content_down(&mut self, amount: usize) {
         let max = self.content_lines.len().saturating_sub(1);
         self.content_scroll = (self.content_scroll + amount).min(max);
     }
 
-    pub fn content_up(&mut self, amount: usize) {
+    pub(crate) fn content_up(&mut self, amount: usize) {
         self.content_scroll = self.content_scroll.saturating_sub(amount);
     }
 
-    pub fn content_top(&mut self) {
+    pub(crate) fn content_top(&mut self) {
         self.content_scroll = 0;
     }
 
-    pub fn content_bottom(&mut self) {
+    pub(crate) fn content_bottom(&mut self) {
         self.content_scroll = self.content_lines.len().saturating_sub(1);
     }
 
@@ -198,7 +243,7 @@ impl<S: GraphSource> App<S> {
         }
     }
 
-    pub fn toggle_focus(&mut self) {
+    pub(crate) fn toggle_focus(&mut self) {
         self.focus = match self.focus {
             Focus::Browser => Focus::Content,
             Focus::Content => Focus::Browser,
@@ -481,5 +526,128 @@ mod tests {
         app.collapse_or_jump_parent();
 
         assert_eq!(app.browser_selected, 0);
+    }
+
+    // --- update method tests ---
+
+    #[test]
+    fn update_quit_returns_true() {
+        let mut app = make_app();
+        let should_quit = app.update(Action::Quit).unwrap();
+        assert!(should_quit);
+    }
+
+    #[test]
+    fn update_toggle_focus_switches_from_browser_to_content() {
+        let mut app = make_app();
+        app.focus = Focus::Browser;
+        let should_quit = app.update(Action::ToggleFocus).unwrap();
+        assert!(!should_quit);
+        assert_eq!(app.focus, Focus::Content);
+    }
+
+    #[test]
+    fn update_toggle_focus_switches_from_content_to_browser() {
+        let mut app = make_app();
+        app.focus = Focus::Content;
+        let should_quit = app.update(Action::ToggleFocus).unwrap();
+        assert!(!should_quit);
+        assert_eq!(app.focus, Focus::Browser);
+    }
+
+    #[test]
+    fn update_browser_down_increments_selected() {
+        let mut app = make_app();
+        app.file_items = vec![
+            FileItem {
+                path: PathBuf::from("a"),
+                name: "a".to_string(),
+                depth: 0,
+                is_dir: false,
+                is_expanded: false,
+            },
+            FileItem {
+                path: PathBuf::from("b"),
+                name: "b".to_string(),
+                depth: 0,
+                is_dir: false,
+                is_expanded: false,
+            },
+        ];
+        app.browser_selected = 0;
+
+        let should_quit = app.update(Action::BrowserDown).unwrap();
+        assert!(!should_quit);
+        assert_eq!(app.browser_selected, 1);
+    }
+
+    #[test]
+    fn update_browser_up_decrements_selected() {
+        let mut app = make_app();
+        app.file_items = vec![
+            FileItem {
+                path: PathBuf::from("a"),
+                name: "a".to_string(),
+                depth: 0,
+                is_dir: false,
+                is_expanded: false,
+            },
+            FileItem {
+                path: PathBuf::from("b"),
+                name: "b".to_string(),
+                depth: 0,
+                is_dir: false,
+                is_expanded: false,
+            },
+        ];
+        app.browser_selected = 1;
+
+        let should_quit = app.update(Action::BrowserUp).unwrap();
+        assert!(!should_quit);
+        assert_eq!(app.browser_selected, 0);
+    }
+
+    #[test]
+    fn update_content_down_increments_scroll() {
+        let mut app = make_app();
+        app.content_lines = dummy_lines(10);
+        app.content_scroll = 0;
+
+        let should_quit = app.update(Action::ContentDown(1)).unwrap();
+        assert!(!should_quit);
+        assert_eq!(app.content_scroll, 1);
+    }
+
+    #[test]
+    fn update_content_up_decrements_scroll() {
+        let mut app = make_app();
+        app.content_lines = dummy_lines(10);
+        app.content_scroll = 5;
+
+        let should_quit = app.update(Action::ContentUp(1)).unwrap();
+        assert!(!should_quit);
+        assert_eq!(app.content_scroll, 4);
+    }
+
+    #[test]
+    fn update_content_top_sets_scroll_to_zero() {
+        let mut app = make_app();
+        app.content_lines = dummy_lines(10);
+        app.content_scroll = 5;
+
+        let should_quit = app.update(Action::ContentTop).unwrap();
+        assert!(!should_quit);
+        assert_eq!(app.content_scroll, 0);
+    }
+
+    #[test]
+    fn update_content_bottom_sets_scroll_to_max() {
+        let mut app = make_app();
+        app.content_lines = dummy_lines(10);
+        app.content_scroll = 0;
+
+        let should_quit = app.update(Action::ContentBottom).unwrap();
+        assert!(!should_quit);
+        assert_eq!(app.content_scroll, 9);
     }
 }
