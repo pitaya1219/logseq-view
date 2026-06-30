@@ -145,8 +145,13 @@ pub fn draw<S: GraphSource>(f: &mut Frame, app: &mut crate::app::App<S>) {
         .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
         .split(chunks[0]);
 
-    let browser_visible_height = main_chunks[0].height as usize;
-    let content_visible_height = main_chunks[1].height as usize;
+    // Both panes are drawn inside a `Borders::ALL` block, so the actual number of
+    // visible rows is the pane height minus the top and bottom border (2 rows).
+    // Clamping must use this inner height, otherwise the selection/scroll can sit
+    // up to 2 rows below the visible area (selection clipped at the bottom).
+    const BORDER_ROWS: usize = 2;
+    let browser_visible_height = (main_chunks[0].height as usize).saturating_sub(BORDER_ROWS);
+    let content_visible_height = (main_chunks[1].height as usize).saturating_sub(BORDER_ROWS);
 
     let vm =
         crate::view_model::build_view_model(app, browser_visible_height, content_visible_height);
@@ -416,4 +421,52 @@ fn draw_statusbar(f: &mut Frame, vm: &ViewModel, area: Rect) {
 
     let bar = Paragraph::new(Line::from(hints)).style(Style::default().bg(Color::Reset));
     f.render_widget(bar, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{App, FileItem};
+    use crate::source::FakeGraphSource;
+    use ratatui::{backend::TestBackend, Terminal};
+    use std::path::PathBuf;
+
+    fn rendered_text(width: u16, height: u16, app: &mut App<FakeGraphSource>) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, app)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn browser_selection_at_bottom_is_visible() {
+        // Regression: clamping used the pane's outer height instead of the height
+        // inside the border, so the selected row could be clipped below the view
+        // when scrolled to the bottom. The last item must remain rendered.
+        let mut app = App::new(PathBuf::new(), FakeGraphSource::new()).unwrap();
+        app.file_items = (0..30)
+            .map(|i| FileItem {
+                path: PathBuf::from(format!("item{i}")),
+                name: format!("item{i}"),
+                depth: 0,
+                is_dir: false,
+                is_expanded: false,
+            })
+            .collect();
+        app.focus = Focus::Browser;
+        app.browser_selected = 29;
+        app.browser_offset = 0;
+
+        let text = rendered_text(50, 22, &mut app);
+        assert!(
+            text.contains("item29"),
+            "selected bottom row should be visible, but it was clipped.\nBuffer:\n{text}"
+        );
+    }
 }
