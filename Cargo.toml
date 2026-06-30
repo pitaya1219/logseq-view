@@ -7,6 +7,7 @@ license = "MIT"
 repository = "https://github.com/pitaya1219/logseq-view"
 keywords = ["logseq", "tui", "markdown", "ratatui"]
 categories = ["command-line-utilities"]
+exclude = ["CLAUDE.md", "ARCHITECTURE.md", "clippy.toml"]
 
 [[bin]]
 name = "lqview"
