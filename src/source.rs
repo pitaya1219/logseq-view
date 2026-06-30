@@ -52,6 +52,12 @@ impl GraphSource for WalkdirGraphSource {
     fn children(&self, dir: &Path) -> anyhow::Result<Vec<Entry>> {
         let mut entries = Vec::new();
 
+        let is_journals_dir = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n == "journals")
+            .unwrap_or(false);
+
         for entry in walkdir::WalkDir::new(dir)
             .max_depth(1)
             .sort_by_file_name()
@@ -82,6 +88,10 @@ impl GraphSource for WalkdirGraphSource {
             );
 
             entries.push(Entry { path, name, is_dir });
+        }
+
+        if is_journals_dir {
+            entries.sort_by(|a, b| b.name.cmp(&a.name));
         }
 
         Ok(entries)
@@ -155,8 +165,17 @@ impl GraphSource for FakeGraphSource {
             }
         }
 
-        // Sort by name for consistent ordering
-        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        let is_journals_dir = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n == "journals")
+            .unwrap_or(false);
+
+        if is_journals_dir {
+            entries.sort_by(|a, b| b.name.cmp(&a.name));
+        } else {
+            entries.sort_by(|a, b| a.name.cmp(&b.name));
+        }
 
         Ok(entries)
     }
@@ -166,5 +185,68 @@ impl GraphSource for FakeGraphSource {
             .get(path)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("File not found: {}", path.display()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_journals_dir_sorts_descending() {
+        let mut source = FakeGraphSource::new();
+
+        let journals_dir = PathBuf::from("/journals");
+        let entries = vec![
+            (PathBuf::from("/journals/2026_01_01.md"), false, ""),
+            (PathBuf::from("/journals/2026_06_30.md"), false, ""),
+            (PathBuf::from("/journals/2026_03_15.md"), false, ""),
+        ];
+
+        source.add_dir_entries(journals_dir.clone(), entries);
+
+        let children = source.children(&journals_dir).unwrap();
+        let names: Vec<&str> = children.iter().map(|e| e.name.as_str()).collect();
+
+        assert_eq!(names, vec!["2026_06_30", "2026_03_15", "2026_01_01"]);
+    }
+
+    #[test]
+    fn test_pages_dir_sorts_ascending() {
+        let mut source = FakeGraphSource::new();
+
+        let pages_dir = PathBuf::from("/pages");
+        let entries = vec![
+            (PathBuf::from("/pages/zzz.md"), false, ""),
+            (PathBuf::from("/pages/aaa.md"), false, ""),
+            (PathBuf::from("/pages/mmm.md"), false, ""),
+        ];
+
+        source.add_dir_entries(pages_dir.clone(), entries);
+
+        let children = source.children(&pages_dir).unwrap();
+        let names: Vec<&str> = children.iter().map(|e| e.name.as_str()).collect();
+
+        assert_eq!(names, vec!["aaa", "mmm", "zzz"]);
+    }
+
+    #[test]
+    fn test_non_journals_dir_sorts_ascending() {
+        let mut source = FakeGraphSource::new();
+
+        let custom_dir = PathBuf::from("/custom");
+        let entries = vec![
+            (PathBuf::from("/custom/file_c.md"), false, ""),
+            (PathBuf::from("/custom/file_a.md"), false, ""),
+            (PathBuf::from("/custom/file_b.md"), false, ""),
+        ];
+
+        source.add_dir_entries(custom_dir.clone(), entries);
+
+        let children = source.children(&custom_dir).unwrap();
+        let names: Vec<&str> = children.iter().map(|e| e.name.as_str()).collect();
+
+        assert_eq!(names, vec!["file_a", "file_b", "file_c"]);
     }
 }
