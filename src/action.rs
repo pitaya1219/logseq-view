@@ -8,6 +8,8 @@ pub enum Action {
     ToggleFocus,
     BrowserUp,
     BrowserDown,
+    BrowserTop,
+    BrowserBottom,
     OpenSelected,
     CollapseOrParent,
     ContentUp(usize),
@@ -22,11 +24,11 @@ pub enum Action {
 /// Encodes the current key behavior:
 /// - `q` and `Ctrl-C` -> Quit (in any focus)
 /// - Browser: Tab->ToggleFocus, Down/j->BrowserDown, Up/k->BrowserUp,
-///   Enter/l->OpenSelected, h->CollapseOrParent
+///   Enter/l->OpenSelected, h->CollapseOrParent,
+///   G->BrowserBottom, g-> if pending_g then BrowserTop else set next pending_g=true
 /// - Content: Tab/h->ToggleFocus, Down/j->ContentDown(1), Up/k->ContentUp(1),
 ///   PageDown->ContentDown(20), PageUp->ContentUp(20),
 ///   G->ContentBottom, g-> if pending_g then ContentTop else set next pending_g=true
-/// - Browser does NOT honor `gg`
 pub fn map_key(focus: Focus, key: KeyEvent, pending_g: bool) -> (Option<Action>, bool) {
     let KeyEvent {
         code, modifiers, ..
@@ -49,6 +51,14 @@ pub fn map_key(focus: Focus, key: KeyEvent, pending_g: bool) -> (Option<Action>,
             KeyCode::Up | KeyCode::Char('k') => Some(Action::BrowserUp),
             KeyCode::Enter | KeyCode::Char('l') => Some(Action::OpenSelected),
             KeyCode::Char('h') => Some(Action::CollapseOrParent),
+            KeyCode::Char('G') => Some(Action::BrowserBottom),
+            KeyCode::Char('g') => {
+                if pending_g {
+                    Some(Action::BrowserTop)
+                } else {
+                    return (None, true);
+                }
+            }
             _ => None,
         },
         Focus::Content => match code {
@@ -185,16 +195,25 @@ mod tests {
     }
 
     #[test]
-    fn browser_gg_not_honored() {
-        // First 'g' should not produce an action, but set pending_g
+    fn browser_g_sets_pending() {
+        // First 'g' with no pending should set pending_g=true, no action
         let (action, pending) = map_key(Focus::Browser, key(KeyCode::Char('g')), false);
         assert_eq!(action, None);
-        // In Browser focus, 'g' is not handled, so pending_g is not set
-        assert!(!pending);
+        assert!(pending);
+    }
 
-        // Even with pending_g true, second 'g' in Browser should not produce ContentTop
+    #[test]
+    fn browser_gg_maps_to_browser_top() {
+        // Second 'g' with pending_g=true should produce BrowserTop, clear pending
         let (action, pending) = map_key(Focus::Browser, key(KeyCode::Char('g')), true);
-        assert_eq!(action, None);
+        assert_eq!(action, Some(Action::BrowserTop));
+        assert!(!pending);
+    }
+
+    #[test]
+    fn browser_g_capital_maps_to_bottom() {
+        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Char('G')), false);
+        assert_eq!(action, Some(Action::BrowserBottom));
         assert!(!pending);
     }
 

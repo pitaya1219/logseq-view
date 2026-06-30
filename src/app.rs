@@ -167,6 +167,14 @@ impl<S: GraphSource> App<S> {
                 self.content_bottom();
                 Ok(false)
             }
+            Action::BrowserTop => {
+                self.browser_top();
+                Ok(false)
+            }
+            Action::BrowserBottom => {
+                self.browser_bottom();
+                Ok(false)
+            }
         }
     }
 
@@ -225,6 +233,71 @@ impl<S: GraphSource> App<S> {
 
     pub(crate) fn content_bottom(&mut self) {
         self.content_scroll = self.content_lines.len().saturating_sub(1);
+    }
+
+    /// Jump to the top of the current directory scope in the browser.
+    /// If at depth 0, goes to index 0 (first item in the whole list).
+    /// If inside a directory (depth > 0), goes to the first child of the parent directory.
+    pub(crate) fn browser_top(&mut self) {
+        let selected_depth = self.file_items[self.browser_selected].depth;
+
+        if selected_depth == 0 {
+            // At top level: go to first item
+            self.browser_selected = 0;
+        } else {
+            // Inside a directory: find the parent and go to its first child
+            let parent_idx = self.find_parent_index(self.browser_selected);
+            if parent_idx + 1 < self.file_items.len() {
+                self.browser_selected = parent_idx + 1;
+            }
+        }
+    }
+
+    /// Jump to the bottom of the current directory scope in the browser.
+    /// If at depth 0, goes to the last item in the whole list.
+    /// If inside a directory (depth > 0), goes to the last item of the parent's subtree.
+    pub(crate) fn browser_bottom(&mut self) {
+        let selected_depth = self.file_items[self.browser_selected].depth;
+
+        if selected_depth == 0 {
+            // At top level: go to last item
+            if !self.file_items.is_empty() {
+                self.browser_selected = self.file_items.len() - 1;
+            }
+        } else {
+            // Inside a directory: find the parent and go to the last item in its subtree
+            let parent_idx = self.find_parent_index(self.browser_selected);
+            let parent_depth = self.file_items[parent_idx].depth;
+
+            // Find the end of the parent's subtree
+            let end = self.find_subtree_end(parent_idx, parent_depth);
+            if end > parent_idx + 1 {
+                self.browser_selected = end - 1;
+            }
+        }
+    }
+
+    /// Find the index of the parent directory for the item at idx.
+    /// Returns the index of the nearest preceding item with depth < current depth.
+    fn find_parent_index(&self, idx: usize) -> usize {
+        let depth = self.file_items[idx].depth;
+        for i in (0..idx).rev() {
+            if self.file_items[i].depth < depth {
+                return i;
+            }
+        }
+        // Should not happen if depth > 0 and tree is valid, but fallback to 0
+        0
+    }
+
+    /// Find the end index (exclusive) of the subtree starting at parent_idx with parent_depth.
+    /// Returns the first index after parent_idx where depth <= parent_depth.
+    fn find_subtree_end(&self, parent_idx: usize, parent_depth: usize) -> usize {
+        let mut end = parent_idx + 1;
+        while end < self.file_items.len() && self.file_items[end].depth > parent_depth {
+            end += 1;
+        }
+        end
     }
 
     // Adjusts browser_offset so that browser_selected stays within the visible window.
@@ -649,5 +722,254 @@ mod tests {
         let should_quit = app.update(Action::ContentBottom).unwrap();
         assert!(!should_quit);
         assert_eq!(app.content_scroll, 9);
+    }
+
+    // --- browser_top / browser_bottom tests ---
+
+    #[test]
+    fn browser_top_at_depth_0_goes_to_first_item() {
+        let mut app = make_app();
+        app.file_items = vec![
+            FileItem {
+                path: PathBuf::from("a"),
+                name: "a".to_string(),
+                depth: 0,
+                is_dir: false,
+                is_expanded: false,
+            },
+            FileItem {
+                path: PathBuf::from("b"),
+                name: "b".to_string(),
+                depth: 0,
+                is_dir: false,
+                is_expanded: false,
+            },
+            FileItem {
+                path: PathBuf::from("c"),
+                name: "c".to_string(),
+                depth: 0,
+                is_dir: false,
+                is_expanded: false,
+            },
+        ];
+        app.browser_selected = 2;
+
+        let should_quit = app.update(Action::BrowserTop).unwrap();
+        assert!(!should_quit);
+        assert_eq!(app.browser_selected, 0);
+    }
+
+    #[test]
+    fn browser_bottom_at_depth_0_goes_to_last_item() {
+        let mut app = make_app();
+        app.file_items = vec![
+            FileItem {
+                path: PathBuf::from("a"),
+                name: "a".to_string(),
+                depth: 0,
+                is_dir: false,
+                is_expanded: false,
+            },
+            FileItem {
+                path: PathBuf::from("b"),
+                name: "b".to_string(),
+                depth: 0,
+                is_dir: false,
+                is_expanded: false,
+            },
+            FileItem {
+                path: PathBuf::from("c"),
+                name: "c".to_string(),
+                depth: 0,
+                is_dir: false,
+                is_expanded: false,
+            },
+        ];
+        app.browser_selected = 0;
+
+        let should_quit = app.update(Action::BrowserBottom).unwrap();
+        assert!(!should_quit);
+        assert_eq!(app.browser_selected, 2);
+    }
+
+    #[test]
+    fn browser_top_inside_dir_goes_to_first_child() {
+        let mut app = make_app();
+        app.file_items = vec![
+            FileItem {
+                path: PathBuf::from("parent"),
+                name: "parent".to_string(),
+                depth: 0,
+                is_dir: true,
+                is_expanded: true,
+            },
+            FileItem {
+                path: PathBuf::from("child1"),
+                name: "child1".to_string(),
+                depth: 1,
+                is_dir: false,
+                is_expanded: false,
+            },
+            FileItem {
+                path: PathBuf::from("child2"),
+                name: "child2".to_string(),
+                depth: 1,
+                is_dir: false,
+                is_expanded: false,
+            },
+            FileItem {
+                path: PathBuf::from("sibling"),
+                name: "sibling".to_string(),
+                depth: 0,
+                is_dir: false,
+                is_expanded: false,
+            },
+        ];
+        app.browser_selected = 2; // child2 (depth 1)
+
+        let should_quit = app.update(Action::BrowserTop).unwrap();
+        assert!(!should_quit);
+        assert_eq!(app.browser_selected, 1); // first child of parent
+    }
+
+    #[test]
+    fn browser_bottom_inside_dir_goes_to_last_child() {
+        let mut app = make_app();
+        app.file_items = vec![
+            FileItem {
+                path: PathBuf::from("parent"),
+                name: "parent".to_string(),
+                depth: 0,
+                is_dir: true,
+                is_expanded: true,
+            },
+            FileItem {
+                path: PathBuf::from("child1"),
+                name: "child1".to_string(),
+                depth: 1,
+                is_dir: false,
+                is_expanded: false,
+            },
+            FileItem {
+                path: PathBuf::from("child2"),
+                name: "child2".to_string(),
+                depth: 1,
+                is_dir: false,
+                is_expanded: false,
+            },
+            FileItem {
+                path: PathBuf::from("sibling"),
+                name: "sibling".to_string(),
+                depth: 0,
+                is_dir: false,
+                is_expanded: false,
+            },
+        ];
+        app.browser_selected = 1; // child1 (depth 1)
+
+        let should_quit = app.update(Action::BrowserBottom).unwrap();
+        assert!(!should_quit);
+        assert_eq!(app.browser_selected, 2); // last child of parent
+    }
+
+    #[test]
+    fn browser_top_inside_nested_dir_goes_to_first_child() {
+        let mut app = make_app();
+        app.file_items = vec![
+            FileItem {
+                path: PathBuf::from("parent"),
+                name: "parent".to_string(),
+                depth: 0,
+                is_dir: true,
+                is_expanded: true,
+            },
+            FileItem {
+                path: PathBuf::from("subdir"),
+                name: "subdir".to_string(),
+                depth: 1,
+                is_dir: true,
+                is_expanded: true,
+            },
+            FileItem {
+                path: PathBuf::from("child1"),
+                name: "child1".to_string(),
+                depth: 2,
+                is_dir: false,
+                is_expanded: false,
+            },
+            FileItem {
+                path: PathBuf::from("child2"),
+                name: "child2".to_string(),
+                depth: 2,
+                is_dir: false,
+                is_expanded: false,
+            },
+            FileItem {
+                path: PathBuf::from("child3"),
+                name: "child3".to_string(),
+                depth: 2,
+                is_dir: false,
+                is_expanded: false,
+            },
+        ];
+        app.browser_selected = 3; // child2 (depth 2)
+
+        let should_quit = app.update(Action::BrowserTop).unwrap();
+        assert!(!should_quit);
+        // parent of child2 (depth 2) is subdir (depth 1) at index 1
+        // first item in subdir's subtree is at index 2 (child1, the first child)
+        assert_eq!(app.browser_selected, 2);
+    }
+
+    #[test]
+    fn browser_bottom_inside_nested_dir_goes_to_last_in_subtree() {
+        let mut app = make_app();
+        app.file_items = vec![
+            FileItem {
+                path: PathBuf::from("parent"),
+                name: "parent".to_string(),
+                depth: 0,
+                is_dir: true,
+                is_expanded: true,
+            },
+            FileItem {
+                path: PathBuf::from("subdir"),
+                name: "subdir".to_string(),
+                depth: 1,
+                is_dir: true,
+                is_expanded: true,
+            },
+            FileItem {
+                path: PathBuf::from("child1"),
+                name: "child1".to_string(),
+                depth: 2,
+                is_dir: false,
+                is_expanded: false,
+            },
+            FileItem {
+                path: PathBuf::from("child2"),
+                name: "child2".to_string(),
+                depth: 2,
+                is_dir: false,
+                is_expanded: false,
+            },
+            FileItem {
+                path: PathBuf::from("child3"),
+                name: "child3".to_string(),
+                depth: 2,
+                is_dir: false,
+                is_expanded: false,
+            },
+        ];
+        app.browser_selected = 2; // child1 (depth 2)
+
+        let should_quit = app.update(Action::BrowserBottom).unwrap();
+        assert!(!should_quit);
+        // parent of child1 (depth 2) is subdir (depth 1) at index 1
+        // parent_depth = 1
+        // end = first index after 1 where depth <= 1: index 5 (out of bounds), so end = 5
+        // subtree of subdir is [2, 5) = [2, 3, 4]
+        // last item in subdir's subtree is at index 4 (child3)
+        assert_eq!(app.browser_selected, 4);
     }
 }

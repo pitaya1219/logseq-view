@@ -25,8 +25,8 @@ lqview
 | `j`/`k` or `↑`/`↓` | Navigate / scroll |
 | `Enter`/`l` | Open file / expand directory |
 | `h` | Collapse directory / jump to parent |
-| `gg` | Top of content |
-| `G` | Bottom of content |
+| `gg` | Top of content (Content) / top of current directory (Browser) |
+| `G` | Bottom of content (Content) / bottom of current directory (Browser) |
 | `PgUp`/`PgDn` | Page scroll |
 | `Tab` | Switch focus (browser ↔ content) |
 | `q` / `Ctrl+c` | Quit |
