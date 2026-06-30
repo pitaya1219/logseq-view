@@ -12,47 +12,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          source $HOME/.cargo/env
-          rustup component add rustfmt clippy
-
-      - name: Cache cargo registry
-        uses: actions/cache@v3
+      - uses: cachix/install-nix-action@v27
         with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-
-
-      - name: Cache cargo index
-        uses: actions/cache@v3
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-index-
-
-      - name: Cache cargo build
-        uses: actions/cache@v3
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-build-target-
+          extra_nix_config: |
+            experimental-features = nix-command flakes
 
       - name: Check formatting
-        run: |
-          source $HOME/.cargo/env
-          cargo fmt --all -- --check
+        run: nix develop --command cargo fmt --all -- --check
 
       - name: Run clippy
-        run: |
-          source $HOME/.cargo/env
-          cargo clippy --all-targets -- -D warnings
+        run: nix develop --command cargo clippy --all-targets -- -D warnings
 
       - name: Run tests
-        run: |
-          source $HOME/.cargo/env
-          cargo test --all
+        run: nix develop --command cargo test --all
