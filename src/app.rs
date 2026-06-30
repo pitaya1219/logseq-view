@@ -1812,4 +1812,126 @@ mod tests {
         app.content_scroll = 0;
         assert_eq!(app.current_match_position(), None);
     }
+
+    // --- Search with task keywords tests ---
+
+    #[test]
+    fn match_line_indices_finds_todo_task() {
+        use crate::parser::TaskState;
+        let mut app = make_app();
+        app.content_lines = vec![
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: Some(TaskState::Todo),
+                segments: vec![Segment::Plain("buy milk".to_string())],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("regular line".to_string())],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: Some(TaskState::Done),
+                segments: vec![Segment::Plain("finished".to_string())],
+            },
+        ];
+        app.search_query = "TODO".to_string();
+
+        let matches = app.match_line_indices();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0], 0);
+    }
+
+    #[test]
+    fn match_line_indices_finds_task_case_insensitive() {
+        use crate::parser::TaskState;
+        let mut app = make_app();
+        app.content_lines = vec![
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: Some(TaskState::Todo),
+                segments: vec![Segment::Plain("buy milk".to_string())],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: Some(TaskState::Done),
+                segments: vec![Segment::Plain("finished".to_string())],
+            },
+        ];
+        // Search for lowercase "todo"
+        app.search_query = "todo".to_string();
+
+        let matches = app.match_line_indices();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0], 0);
+    }
+
+    #[test]
+    fn match_line_indices_finds_multiple_task_states() {
+        use crate::parser::TaskState;
+        let mut app = make_app();
+        app.content_lines = vec![
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: Some(TaskState::Todo),
+                segments: vec![Segment::Plain("first".to_string())],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("regular".to_string())],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: Some(TaskState::Done),
+                segments: vec![Segment::Plain("second".to_string())],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: Some(TaskState::Todo),
+                segments: vec![Segment::Plain("third".to_string())],
+            },
+        ];
+        app.search_query = "TODO".to_string();
+
+        let matches = app.match_line_indices();
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0], 0);
+        assert_eq!(matches[1], 3);
+    }
+
+    #[test]
+    fn find_next_match_finds_todo_task() {
+        use crate::parser::TaskState;
+        let mut app = make_app();
+        app.content_lines = vec![
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("regular".to_string())],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: Some(TaskState::Todo),
+                segments: vec![Segment::Plain("task here".to_string())],
+            },
+        ];
+        app.search_query = "TODO".to_string();
+
+        // Start from position 0, should find the TODO at position 1
+        let result = app.find_next_match(0, false);
+        assert_eq!(result, Some(1));
+    }
 }

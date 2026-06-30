@@ -346,23 +346,34 @@ fn draw_statusbar(f: &mut Frame, vm: &ViewModel, area: Rect) {
         }
     };
 
-    // If search query is non-empty, prepend the search prompt with hit count
-    if !vm.search_query.is_empty() {
-        let counter = if vm.content.match_count > 0 {
-            if let Some(current) = vm.content.current_match {
-                format!(" [{}/{}]", current, vm.content.match_count)
+    // If search is active, show the search prompt (even with empty query)
+    // After commit (search_active == false), only show if query is non-empty
+    if vm.search_active || !vm.search_query.is_empty() {
+        // Only show counter when query is non-empty
+        let counter = if !vm.search_query.is_empty() {
+            if vm.content.match_count > 0 {
+                if let Some(current) = vm.content.current_match {
+                    format!(" [{}/{}]", current, vm.content.match_count)
+                } else {
+                    // Current scroll position is not a match
+                    format!(" [-/{}]", vm.content.match_count)
+                }
             } else {
-                // Current scroll position is not a match
-                format!(" [-/{}]", vm.content.match_count)
+                " [no matches]".to_string()
             }
         } else {
-            " [no matches]".to_string()
+            String::new()
         };
 
         let search_span = if vm.search_active {
             // In search mode: yellow background
+            let display_text = if vm.search_query.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{}", vm.search_query)
+            };
             Span::styled(
-                format!("/{}", vm.search_query),
+                display_text,
                 Style::default()
                     .fg(Color::Black)
                     .bg(Color::Yellow)
@@ -379,7 +390,9 @@ fn draw_statusbar(f: &mut Frame, vm: &ViewModel, area: Rect) {
         };
 
         hints.insert(0, search_span);
-        hints.insert(1, Span::raw(counter));
+        if !counter.is_empty() {
+            hints.insert(1, Span::raw(counter));
+        }
     }
 
     let bar = Paragraph::new(Line::from(hints)).style(Style::default().bg(Color::Reset));

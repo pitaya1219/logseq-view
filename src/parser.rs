@@ -8,6 +8,20 @@ pub enum TaskState {
     Cancelled,
 }
 
+impl TaskState {
+    /// Returns the keyword string for this task state (e.g., "TODO", "DONE").
+    pub fn keyword(&self) -> &'static str {
+        match self {
+            TaskState::Todo => "TODO",
+            TaskState::Done => "DONE",
+            TaskState::Later => "LATER",
+            TaskState::Now => "NOW",
+            TaskState::Waiting => "WAITING",
+            TaskState::Cancelled => "CANCELLED",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ParsedLine {
     pub indent: usize,
@@ -142,8 +156,16 @@ pub fn parse_file(content: &str) -> Vec<ParsedLine> {
 
 /// Extract plain text from a ParsedLine's segments for search purposes.
 /// Concatenates the textual content of each segment, ignoring formatting.
+/// If the line has a task state, the keyword (e.g., "TODO", "DONE") is prepended.
 pub fn line_to_plain_text(line: &ParsedLine) -> String {
     let mut text = String::new();
+
+    // Include task keyword if present
+    if let Some(ref task) = line.task {
+        text.push_str(task.keyword());
+        text.push(' ');
+    }
+
     for segment in &line.segments {
         match segment {
             Segment::Plain(s) => text.push_str(s),
@@ -798,5 +820,70 @@ mod tests {
             ],
         };
         assert_eq!(line_to_plain_text(&line), "italic and bold");
+    }
+
+    // ============ TaskState::keyword tests ============
+
+    #[test]
+    fn test_task_state_keyword() {
+        assert_eq!(TaskState::Todo.keyword(), "TODO");
+        assert_eq!(TaskState::Done.keyword(), "DONE");
+        assert_eq!(TaskState::Later.keyword(), "LATER");
+        assert_eq!(TaskState::Now.keyword(), "NOW");
+        assert_eq!(TaskState::Waiting.keyword(), "WAITING");
+        assert_eq!(TaskState::Cancelled.keyword(), "CANCELLED");
+    }
+
+    // ============ line_to_plain_text with task tests ============
+
+    #[test]
+    fn test_line_to_plain_text_with_task_todo() {
+        let line = ParsedLine {
+            indent: 0,
+            is_bullet: false,
+            task: Some(TaskState::Todo),
+            segments: vec![Segment::Plain("buy milk".to_string())],
+        };
+        assert_eq!(line_to_plain_text(&line), "TODO buy milk");
+    }
+
+    #[test]
+    fn test_line_to_plain_text_with_task_done() {
+        let line = ParsedLine {
+            indent: 0,
+            is_bullet: false,
+            task: Some(TaskState::Done),
+            segments: vec![Segment::Plain("finished task".to_string())],
+        };
+        assert_eq!(line_to_plain_text(&line), "DONE finished task");
+    }
+
+    #[test]
+    fn test_line_to_plain_text_with_task_cancelled() {
+        let line = ParsedLine {
+            indent: 0,
+            is_bullet: false,
+            task: Some(TaskState::Cancelled),
+            segments: vec![Segment::Plain("abandoned".to_string())],
+        };
+        assert_eq!(line_to_plain_text(&line), "CANCELLED abandoned");
+    }
+
+    #[test]
+    fn test_line_to_plain_text_with_task_and_mixed_segments() {
+        let line = ParsedLine {
+            indent: 0,
+            is_bullet: false,
+            task: Some(TaskState::Later),
+            segments: vec![
+                Segment::Plain("Review ".to_string()),
+                Segment::PageLink("documentation".to_string()),
+                Segment::Plain(" tomorrow".to_string()),
+            ],
+        };
+        assert_eq!(
+            line_to_plain_text(&line),
+            "LATER Review documentation tomorrow"
+        );
     }
 }
