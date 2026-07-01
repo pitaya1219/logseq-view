@@ -9,7 +9,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use logseq_view::action::map_key;
-use logseq_view::app::App;
+use logseq_view::app::{App, Focus};
 use logseq_view::source::WalkdirGraphSource;
 use ratatui::{backend::CrosstermBackend, Terminal};
 
@@ -79,7 +79,19 @@ fn event_loop(
         }
 
         if let Event::Key(key) = event::read()? {
-            let (action, next_pending_g) = map_key(app.focus, key, pending_g, app.search_active);
+            let search_input_active = match app.focus {
+                Focus::Content => app.content_search_active,
+                Focus::Browser => app.browser_search_active,
+            };
+            let browser_has_committed = app.browser_has_committed_search();
+
+            let (action, next_pending_g) = map_key(
+                app.focus,
+                key,
+                pending_g,
+                search_input_active,
+                browser_has_committed,
+            );
             pending_g = next_pending_g;
 
             if let Some(action) = action {

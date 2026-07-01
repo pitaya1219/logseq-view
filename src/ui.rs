@@ -253,28 +253,21 @@ fn draw_content(f: &mut Frame, vm: &ViewModel, area: Rect) {
         .zip(vm.content.line_highlights.iter())
         .map(|(line, highlight)| {
             let base_line = render_line(line);
-            // Apply background highlight to the entire line based on search state
             match highlight {
-                LineHighlight::Current => {
-                    // Current match: yellow background
-                    Line::from(
-                        base_line
-                            .spans
-                            .into_iter()
-                            .map(|span| span.bg(Color::Yellow).fg(Color::Black))
-                            .collect::<Vec<_>>(),
-                    )
-                }
-                LineHighlight::Match => {
-                    // Other matches: dark blue background
-                    Line::from(
-                        base_line
-                            .spans
-                            .into_iter()
-                            .map(|span| span.bg(Color::DarkGray))
-                            .collect::<Vec<_>>(),
-                    )
-                }
+                LineHighlight::Current => Line::from(
+                    base_line
+                        .spans
+                        .into_iter()
+                        .map(|span| span.bg(Color::Yellow).fg(Color::Black))
+                        .collect::<Vec<_>>(),
+                ),
+                LineHighlight::Match => Line::from(
+                    base_line
+                        .spans
+                        .into_iter()
+                        .map(|span| span.bg(Color::DarkGray))
+                        .collect::<Vec<_>>(),
+                ),
                 LineHighlight::None => base_line,
             }
         })
@@ -346,31 +339,15 @@ fn draw_statusbar(f: &mut Frame, vm: &ViewModel, area: Rect) {
         }
     };
 
-    // If search is active, show the search prompt (even with empty query)
-    // After commit (search_active == false), only show if query is non-empty
-    if vm.search_active || !vm.search_query.is_empty() {
-        // Only show counter when query is non-empty
-        let counter = if !vm.search_query.is_empty() {
-            if vm.content.match_count > 0 {
-                if let Some(current) = vm.content.current_match {
-                    format!(" [{}/{}]", current, vm.content.match_count)
-                } else {
-                    // Current scroll position is not a match
-                    format!(" [-/{}]", vm.content.match_count)
-                }
-            } else {
-                " [no matches]".to_string()
-            }
-        } else {
-            String::new()
-        };
-
-        let search_span = if vm.search_active {
-            // In search mode: yellow background
-            let display_text = if vm.search_query.is_empty() {
+    // Browser search prompt
+    if vm.focus == Focus::Browser
+        && (vm.browser_search_active || !vm.browser_search_query.is_empty())
+    {
+        let search_span = if vm.browser_search_active {
+            let display_text = if vm.browser_search_query.is_empty() {
                 "/".to_string()
             } else {
-                format!("/{}", vm.search_query)
+                format!("/{}", vm.browser_search_query)
             };
             Span::styled(
                 display_text,
@@ -380,9 +357,51 @@ fn draw_statusbar(f: &mut Frame, vm: &ViewModel, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             )
         } else {
-            // After commit: less prominent
             Span::styled(
-                format!("/{}", vm.search_query),
+                format!("/{}", vm.browser_search_query),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+        };
+        hints.insert(0, search_span);
+        hints.insert(1, Span::raw(" "));
+    }
+
+    // Content search prompt with match counter
+    if vm.focus == Focus::Content
+        && (vm.content_search_active || !vm.content_search_query.is_empty())
+    {
+        let counter = if !vm.content_search_query.is_empty() {
+            if vm.content.match_count > 0 {
+                if let Some(current) = vm.content.current_match {
+                    format!(" [{}/{}]", current, vm.content.match_count)
+                } else {
+                    format!(" [-/{}]", vm.content.match_count)
+                }
+            } else {
+                " [no matches]".to_string()
+            }
+        } else {
+            String::new()
+        };
+
+        let search_span = if vm.content_search_active {
+            let display_text = if vm.content_search_query.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{}", vm.content_search_query)
+            };
+            Span::styled(
+                display_text,
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(
+                format!("/{}", vm.content_search_query),
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),

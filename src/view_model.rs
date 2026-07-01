@@ -53,34 +53,35 @@ pub struct ViewModel {
     pub browser: BrowserView,
     pub content: ContentView,
     pub focus: Focus,
-    pub search_active: bool,
-    pub search_query: String,
+    // Content search state (for status bar and highlight)
+    pub content_search_active: bool,
+    pub content_search_query: String,
+    // Browser search state (for status bar)
+    pub browser_search_active: bool,
+    pub browser_search_query: String,
 }
 
 /// Build a ViewModel from the App state and visible heights.
-/// This is the presenter function that performs scroll clamping and slicing.
 pub fn build_view_model<S: GraphSource>(
     app: &mut App<S>,
     browser_visible_height: usize,
     content_visible_height: usize,
 ) -> ViewModel {
-    // Clamp and slice browser
     let browser_view = build_browser_view(app, browser_visible_height);
-
-    // Clamp and slice content
     let content_view = build_content_view(app, content_visible_height);
 
     ViewModel {
         browser: browser_view,
         content: content_view,
         focus: app.focus,
-        search_active: app.search_active,
-        search_query: app.search_query.clone(),
+        content_search_active: app.content_search_active,
+        content_search_query: app.content_search_query.clone(),
+        browser_search_active: app.browser_search_active,
+        browser_search_query: app.browser_search_query.clone(),
     }
 }
 
 fn build_browser_view<S: GraphSource>(app: &mut App<S>, visible_height: usize) -> BrowserView {
-    // Perform scroll clamping using the app's method
     app.clamp_browser_scroll(visible_height);
 
     let visible_rows: Vec<BrowserRow> = app
@@ -108,7 +109,6 @@ fn build_browser_view<S: GraphSource>(app: &mut App<S>, visible_height: usize) -
 }
 
 fn build_content_view<S: GraphSource>(app: &mut App<S>, visible_height: usize) -> ContentView {
-    // Perform scroll clamping using the app's method
     app.clamp_content_scroll(visible_height);
 
     let title = app
@@ -131,7 +131,6 @@ fn build_content_view<S: GraphSource>(app: &mut App<S>, visible_height: usize) -
             .collect()
     };
 
-    // Compute scrollbar info
     let scrollbar = if no_file_loaded {
         None
     } else {
@@ -146,28 +145,20 @@ fn build_content_view<S: GraphSource>(app: &mut App<S>, visible_height: usize) -
         }
     };
 
-    // Compute search-related info if there's an active search query
-    let (match_count, current_match, line_highlights) = if app.search_query.is_empty() {
+    // Compute search highlight info using the content search query
+    let (match_count, current_match, line_highlights) = if app.content_search_query.is_empty() {
         (0, None, vec![LineHighlight::None; visible_lines.len()])
     } else {
         let match_indices = app.match_line_indices();
         let match_count = match_indices.len();
-
-        // Find current match position (1-based)
         let current_match = app.current_match_position();
 
-        // Get the absolute index of the current match (the line at content_scroll)
-        // This is the line that should be highlighted as Current
         let current_match_line = if current_match.is_some() {
-            // The line at content_scroll is the current match
             Some(app.content_scroll)
         } else {
-            // content_scroll is not a match line, but we still want to highlight
-            // the first visible match if any, or None
             None
         };
 
-        // Build line highlights for visible lines
         let line_highlights: Vec<LineHighlight> = visible_lines
             .iter()
             .enumerate()
@@ -181,13 +172,10 @@ fn build_content_view<S: GraphSource>(app: &mut App<S>, visible_height: usize) -
                     } else {
                         LineHighlight::None
                     }
+                } else if match_indices.contains(&absolute_idx) {
+                    LineHighlight::Match
                 } else {
-                    // No current match (content_scroll is not a match)
-                    if match_indices.contains(&absolute_idx) {
-                        LineHighlight::Match
-                    } else {
-                        LineHighlight::None
-                    }
+                    LineHighlight::None
                 }
             })
             .collect();
@@ -216,11 +204,8 @@ mod tests {
     use std::path::PathBuf;
 
     fn make_app() -> App<FakeGraphSource> {
-        // Create app with empty FakeGraphSource - children will return empty vec
-        // which is fine for our tests
         let source = FakeGraphSource::new();
         let mut app = App::new(PathBuf::new(), source).unwrap();
-        // Reset to clean state
         app.file_items.clear();
         app.browser_selected = 0;
         app.browser_offset = 0;
@@ -259,7 +244,6 @@ mod tests {
     #[test]
     fn browser_clamp_selected_before_offset() {
         let mut app = make_app();
-        // Need at least 13 items to show 10 visible rows after offset clamping
         app.file_items = dummy_file_items(13);
         app.browser_offset = 5;
         app.browser_selected = 3;
@@ -268,7 +252,6 @@ mod tests {
 
         assert_eq!(app.browser_offset, 3);
         assert_eq!(vm.browser.visible_rows.len(), 10);
-        // Selected should be at index 0 (3 - 3 = 0)
         assert!(vm.browser.visible_rows[0].is_selected);
     }
 
@@ -283,7 +266,6 @@ mod tests {
 
         assert_eq!(app.browser_offset, 6);
         assert_eq!(vm.browser.visible_rows.len(), 5);
-        // Selected should be at index 4 (10 - 6 = 4)
         assert!(vm.browser.visible_rows[4].is_selected);
     }
 
@@ -298,7 +280,6 @@ mod tests {
 
         assert_eq!(app.browser_offset, 2);
         assert_eq!(vm.browser.visible_rows.len(), 10);
-        // Selected should be at index 2 (4 - 2 = 2)
         assert!(!vm.browser.visible_rows[0].is_selected);
         assert!(!vm.browser.visible_rows[1].is_selected);
         assert!(vm.browser.visible_rows[2].is_selected);
@@ -409,7 +390,7 @@ mod tests {
 
         assert!(vm.content.scrollbar.is_some());
         let scrollbar = vm.content.scrollbar.unwrap();
-        assert_eq!(scrollbar.total, 10); // 20 - 10 = 10
+        assert_eq!(scrollbar.total, 10);
         assert_eq!(scrollbar.position, 5);
     }
 
@@ -452,10 +433,7 @@ mod tests {
 
     #[test]
     fn content_title_url_decoded() {
-        // Note: In the real app, file names are already URL-decoded by the GraphSource.
-        // The presenter still applies url_decode for safety (idempotent for already-decoded names).
         let mut app = make_app();
-        // Simulate a file whose name was URL-encoded in the filesystem
         app.current_file = Some(PathBuf::from("/path/to/encoded name.md"));
         app.content_lines = Vec::new();
 
@@ -485,7 +463,7 @@ mod tests {
         app.current_file = Some(PathBuf::from("/test/file.md"));
         app.content_lines = dummy_lines_with_text(5, "line");
         app.content_scroll = 0;
-        app.search_query = String::new();
+        app.content_search_query = String::new();
 
         let vm = build_view_model(&mut app, 0, 10);
 
@@ -511,25 +489,18 @@ mod tests {
             make_line("no match"),
         ];
         app.content_scroll = 0;
-        app.search_query = "target".to_string();
+        app.content_search_query = "target".to_string();
 
         let vm = build_view_model(&mut app, 0, 10);
 
         assert_eq!(vm.content.match_count, 3);
-        // Current scroll is at line 0 which is a match, so current_match should be Some(1)
         assert_eq!(vm.content.current_match, Some(1));
 
-        // All visible lines (5 lines) should have highlights
         assert_eq!(vm.content.line_highlights.len(), 5);
-        // Line 0: Current match
         assert_eq!(vm.content.line_highlights[0], LineHighlight::Current);
-        // Line 1: No match
         assert_eq!(vm.content.line_highlights[1], LineHighlight::None);
-        // Line 2: Match (but not current)
         assert_eq!(vm.content.line_highlights[2], LineHighlight::Match);
-        // Line 3: Match (but not current)
         assert_eq!(vm.content.line_highlights[3], LineHighlight::Match);
-        // Line 4: No match
         assert_eq!(vm.content.line_highlights[4], LineHighlight::None);
     }
 
@@ -542,20 +513,16 @@ mod tests {
             make_line("other line"),
             make_line("target line 2"),
         ];
-        app.content_scroll = 1; // Scroll to line 1 which is NOT a match
-        app.search_query = "target".to_string();
+        app.content_scroll = 1;
+        app.content_search_query = "target".to_string();
 
         let vm = build_view_model(&mut app, 0, 10);
 
         assert_eq!(vm.content.match_count, 2);
-        // Current scroll is at line 1 which is NOT a match
         assert_eq!(vm.content.current_match, None);
 
-        // visible_lines will be [1, 2] (2 lines) since content_scroll=1 and we have 3 lines
         assert_eq!(vm.content.line_highlights.len(), 2);
-        // Line 0 (absolute index 1+0=1): "other line" is NOT a match
         assert_eq!(vm.content.line_highlights[0], LineHighlight::None);
-        // Line 1 (absolute index 1+1=2): "target line 2" IS a match
         assert_eq!(vm.content.line_highlights[1], LineHighlight::Match);
     }
 
@@ -569,16 +536,13 @@ mod tests {
             make_line("target line 2"),
             make_line("target line 3"),
         ];
-        app.content_scroll = 2; // Scroll to line 2 which IS a match
-        app.search_query = "target".to_string();
+        app.content_scroll = 2;
+        app.content_search_query = "target".to_string();
 
         let vm = build_view_model(&mut app, 0, 10);
 
         assert_eq!(vm.content.match_count, 3);
-        // Current scroll is at line 2 which is the second match
         assert_eq!(vm.content.current_match, Some(2));
-
-        // The first visible line is at index 2 which should be Current
         assert_eq!(vm.content.line_highlights[0], LineHighlight::Current);
     }
 
@@ -588,7 +552,7 @@ mod tests {
         app.current_file = Some(PathBuf::from("/test/file.md"));
         app.content_lines = vec![make_line("line 1"), make_line("line 2")];
         app.content_scroll = 0;
-        app.search_query = "zzz".to_string();
+        app.content_search_query = "zzz".to_string();
 
         let vm = build_view_model(&mut app, 0, 10);
 
@@ -614,9 +578,8 @@ mod tests {
             make_line("target line 3"),
         ];
         app.content_scroll = 0;
-        app.search_query = "target".to_string();
+        app.content_search_query = "target".to_string();
 
-        // Only show 3 lines at a time
         let vm = build_view_model(&mut app, 0, 3);
 
         assert_eq!(vm.content.match_count, 3);
@@ -624,11 +587,8 @@ mod tests {
         assert_eq!(vm.content.visible_lines.len(), 3);
         assert_eq!(vm.content.line_highlights.len(), 3);
 
-        // Line 0: Current match (target line 1)
         assert_eq!(vm.content.line_highlights[0], LineHighlight::Current);
-        // Line 1: No match (other line 1)
         assert_eq!(vm.content.line_highlights[1], LineHighlight::None);
-        // Line 2: Match (target line 2)
         assert_eq!(vm.content.line_highlights[2], LineHighlight::Match);
     }
 
