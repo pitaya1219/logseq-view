@@ -30,7 +30,7 @@ jobs:
         run: |
           SERVER=$(echo "${GITHUB_SERVER_URL}" | sed 's|^https\?://||')
           git config user.name "workflow-bot"
-          git config user.email "workflow-bot@users.noreply.${SERVER}"
+          git config user.email "workflow-bot@localhost"
           ORIGIN=$(echo "${GITHUB_SERVER_URL}" | sed "s|://|://workflow-bot:${GITEA_TOKEN}@|")
           git remote set-url origin "${ORIGIN}/${GITHUB_REPOSITORY}.git"
 
