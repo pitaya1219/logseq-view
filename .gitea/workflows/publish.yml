@@ -25,10 +25,11 @@ jobs:
         env:
           GITEA_TOKEN: ${{ gitea.token }}
         run: |
-          SERVER="${GITHUB_SERVER_URL#https://}"
+          SERVER=$(echo "${GITHUB_SERVER_URL}" | sed 's|^https\?://||')
           git config user.name "gitea-actions[bot]"
           git config user.email "gitea-actions[bot]@users.noreply.${SERVER}"
-          git remote set-url origin "https://x-token:${GITEA_TOKEN}@${SERVER}/${GITHUB_REPOSITORY}.git"
+          ORIGIN=$(echo "${GITHUB_SERVER_URL}" | sed "s|://|://x-token:${GITEA_TOKEN}@|")
+          git remote set-url origin "${ORIGIN}/${GITHUB_REPOSITORY}.git"
 
       - name: Bump version in Cargo.toml and Cargo.lock
         run: |
