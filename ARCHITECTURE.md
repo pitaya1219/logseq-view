@@ -48,3 +48,17 @@ Recorded so future changes (and agents) keep the same shape instead of re-derivi
 
 The dependency direction itself (shell → core) is enforced by `clippy.toml`'s `disallowed_*` lints in
 CI, not by documentation. This file is guidance; the lint is the guard.
+
+## Release Process
+
+Releases are automated via `.gitea/workflows/publish.yml` on `v*` tag push.
+
+**Steps to cut a release:**
+1. Bump `version` in `Cargo.toml`.
+2. Run `git cliff -o CHANGELOG.md` to regenerate the full changelog.
+3. Commit: `chore(release): vX.Y.Z` (this commit is excluded from the changelog by `cliff.toml`).
+4. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+
+CI will verify that the tag version matches `Cargo.toml`, publish to crates.io, and create a Gitea release with the generated release notes.
+
+**Commit message convention (required for changelog generation):** All commits must use [Conventional Commits](https://www.conventionalcommits.org/) prefixes (`feat:`, `fix:`, `refactor:`, `chore:`, etc.); `git-cliff` reads these to build the changelog.
