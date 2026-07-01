@@ -53,12 +53,17 @@ CI, not by documentation. This file is guidance; the lint is the guard.
 
 Releases are automated via `.gitea/workflows/publish.yml` on `v*` tag push.
 
-**Steps to cut a release:**
+Two equivalent paths — pick either:
+
+**UI path (Gitea Actions tab → Publish → Run workflow):**  
+Enter the version (e.g. `0.2.0`) and click Run. CI bumps `Cargo.toml`, updates `Cargo.lock`, regenerates `CHANGELOG.md`, commits, tags, then publishes.
+
+**CLI path:**
 1. Bump `version` in `Cargo.toml`.
 2. Run `git cliff -o CHANGELOG.md` to regenerate the full changelog.
-3. Commit: `chore(release): vX.Y.Z` (this commit is excluded from the changelog by `cliff.toml`).
-4. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+3. Commit: `chore(release): vX.Y.Z` (excluded from the changelog by `cliff.toml`).
+4. `git tag vX.Y.Z && git push origin vX.Y.Z` — CI takes it from there.
 
-CI will verify that the tag version matches `Cargo.toml`, publish to crates.io, and create a Gitea release with the generated release notes.
+In both cases, CI verifies tag version == `Cargo.toml` version, publishes to crates.io, and creates a Gitea release with generated release notes.
 
 **Commit message convention (required for changelog generation):** All commits must use [Conventional Commits](https://www.conventionalcommits.org/) prefixes (`feat:`, `fix:`, `refactor:`, `chore:`, etc.); `git-cliff` reads these to build the changelog.

@@ -1,12 +1,66 @@
 name: Publish to crates.io
 
 on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 0.2.0, without v prefix)'
+        required: true
   push:
     tags:
       - 'v*'
 
 jobs:
+  # UI path: triggered via Actions → Run workflow
+  # Bumps version, generates CHANGELOG, commits, creates tag → triggers publish job
+  bump-and-tag:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        env:
+          GITEA_TOKEN: ${{ gitea.token }}
+        run: |
+          SERVER="${GITHUB_SERVER_URL#https://}"
+          git config user.name "gitea-actions[bot]"
+          git config user.email "gitea-actions[bot]@users.noreply.${SERVER}"
+          git remote set-url origin "https://x-token:${GITEA_TOKEN}@${SERVER}/${GITHUB_REPOSITORY}.git"
+
+      - name: Bump version in Cargo.toml and Cargo.lock
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
+          awk -v v="${VERSION}" '
+            /^name = "logseq-view"/ { found=1 }
+            found && /^version = "/ { sub(/"[^"]*"/, "\"" v "\""); found=0 }
+            { print }
+          ' Cargo.lock > Cargo.lock.tmp && mv Cargo.lock.tmp Cargo.lock
+
+      - name: Install git-cliff
+        run: |
+          CLIFF_VERSION="2.9.1"
+          curl -sSL "https://github.com/orhun/git-cliff/releases/download/v${CLIFF_VERSION}/git-cliff-${CLIFF_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+            | tar -xz -C /tmp
+          sudo mv "/tmp/git-cliff-${CLIFF_VERSION}-x86_64-unknown-linux-musl/git-cliff" /usr/local/bin/git-cliff
+
+      - name: Update CHANGELOG.md
+        run: git cliff --tag "v${VERSION}" -o CHANGELOG.md
+
+      - name: Commit, tag, and push
+        run: |
+          git add Cargo.toml Cargo.lock CHANGELOG.md
+          git commit -m "chore(release): v${VERSION}"
+          git tag "v${VERSION}"
+          git push origin HEAD:main "v${VERSION}"
+
+  # CLI path: triggered by v* tag push (including the tag created by bump-and-tag above)
   publish:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
