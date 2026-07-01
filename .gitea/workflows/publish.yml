@@ -10,6 +10,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   # UI path: triggered via Actions → Run workflow
   # Bumps version, generates CHANGELOG, commits, creates tag → triggers publish job
