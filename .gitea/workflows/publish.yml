@@ -45,8 +45,7 @@ jobs:
         run: |
           CLIFF_VERSION="2.9.1"
           curl -sSL "https://github.com/orhun/git-cliff/releases/download/v${CLIFF_VERSION}/git-cliff-${CLIFF_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
-            | tar -xz -C /tmp
-          sudo mv "/tmp/git-cliff-${CLIFF_VERSION}-x86_64-unknown-linux-musl/git-cliff" /usr/local/bin/git-cliff
+            | sudo tar -xz -C /usr/local/bin git-cliff
 
       - name: Update CHANGELOG.md
         run: git cliff --tag "v${VERSION}" -o CHANGELOG.md
@@ -100,8 +99,7 @@ jobs:
         run: |
           CLIFF_VERSION="2.9.1"
           curl -sSL "https://github.com/orhun/git-cliff/releases/download/v${CLIFF_VERSION}/git-cliff-${CLIFF_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
-            | tar -xz -C /tmp
-          sudo mv "/tmp/git-cliff-${CLIFF_VERSION}-x86_64-unknown-linux-musl/git-cliff" /usr/local/bin/git-cliff
+            | sudo tar -xz -C /usr/local/bin git-cliff
 
       - name: Generate release notes
         run: |
