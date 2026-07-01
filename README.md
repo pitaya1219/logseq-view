@@ -25,12 +25,11 @@ lqview
 | `j`/`k` or `↑`/`↓` | Navigate / scroll |
 | `Enter`/`l` | Open file / expand directory |
 | `h` | Collapse directory / jump to parent |
-| `gg` | Top of content (Content) / top of current directory (Browser) |
-| `G` | Bottom of content (Content) / bottom of current directory (Browser) |
+| `gg` | Top of content (Content) / top of current directory scope (Browser) |
+| `G` | Bottom of content (Content) / bottom of current directory scope (Browser) |
 | `PgUp`/`PgDn` | Page scroll |
-| `/` | Start in-page search (shows match count) |
-| `n` | Next search match |
-| `N` | Previous search match |
+| `/` | In-page search with match count (Content) / file name search (Browser) |
+| `n` / `N` | Next / previous search match |
 | `Esc` | Cancel search |
 | `Tab` | Switch focus (browser ↔ content) |
 | `q` / `Ctrl+c` | Quit |
