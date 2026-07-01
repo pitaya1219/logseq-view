@@ -28,10 +28,13 @@ jobs:
         env:
           GITEA_TOKEN: ${{ secrets.WORKFLOW_BOT_TOKEN }}
         run: |
-          SERVER=$(echo "${GITHUB_SERVER_URL}" | sed 's|^https\?://||')
-          git config user.name "workflow-bot"
-          git config user.email "workflow-bot@localhost"
-          ORIGIN=$(echo "${GITHUB_SERVER_URL}" | sed "s|://|://workflow-bot:${GITEA_TOKEN}@|")
+          BOT_JSON=$(curl -sf -H "Authorization: token ${GITEA_TOKEN}" "${GITHUB_SERVER_URL}/api/v1/user")
+          BOT_NAME=$(echo "$BOT_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['login'])")
+          BOT_EMAIL=$(echo "$BOT_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['email'])")
+          echo "Pushing as: ${BOT_NAME} <${BOT_EMAIL}>"
+          git config user.name "${BOT_NAME}"
+          git config user.email "${BOT_EMAIL}"
+          ORIGIN=$(echo "${GITHUB_SERVER_URL}" | sed "s|://|://${BOT_NAME}:${GITEA_TOKEN}@|")
           git remote set-url origin "${ORIGIN}/${GITHUB_REPOSITORY}.git"
 
       - name: Bump version in Cargo.toml and Cargo.lock
