@@ -58,8 +58,13 @@ jobs:
 
       - name: Commit, tag, and push
         run: |
+          echo "=== git config check ==="
+          git config user.name
+          git config user.email
           git add Cargo.toml Cargo.lock CHANGELOG.md
           git commit -m "chore(release): v${VERSION}"
+          echo "=== commit author check ==="
+          git log -1 --format="author: %an <%ae>  committer: %cn <%ce>"
           git tag "v${VERSION}"
           git push origin HEAD:main "v${VERSION}"
 
