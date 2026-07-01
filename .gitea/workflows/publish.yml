@@ -26,12 +26,12 @@ jobs:
 
       - name: Configure git
         env:
-          GITEA_TOKEN: ${{ gitea.token }}
+          GITEA_TOKEN: ${{ secrets.WORKFLOW_BOT_TOKEN }}
         run: |
           SERVER=$(echo "${GITHUB_SERVER_URL}" | sed 's|^https\?://||')
-          git config user.name "gitea-actions[bot]"
-          git config user.email "gitea-actions[bot]@users.noreply.${SERVER}"
-          ORIGIN=$(echo "${GITHUB_SERVER_URL}" | sed "s|://|://x-token:${GITEA_TOKEN}@|")
+          git config user.name "workflow-bot"
+          git config user.email "workflow-bot@users.noreply.${SERVER}"
+          ORIGIN=$(echo "${GITHUB_SERVER_URL}" | sed "s|://|://workflow-bot:${GITEA_TOKEN}@|")
           git remote set-url origin "${ORIGIN}/${GITHUB_REPOSITORY}.git"
 
       - name: Bump version in Cargo.toml and Cargo.lock
