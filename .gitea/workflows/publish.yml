@@ -125,8 +125,8 @@ jobs:
 
       - name: Generate release notes
         run: |
-          git cliff --current --strip all > RELEASE_NOTES.md
-          cat RELEASE_NOTES.md
+          git cliff --current --strip all > "${RUNNER_TEMP}/RELEASE_NOTES.md"
+          cat "${RUNNER_TEMP}/RELEASE_NOTES.md"
 
       - name: Publish to crates.io
         run: |
@@ -139,7 +139,7 @@ jobs:
         env:
           GITEA_TOKEN: ${{ gitea.token }}
         run: |
-          BODY=$(cat RELEASE_NOTES.md)
+          BODY=$(cat "${RUNNER_TEMP}/RELEASE_NOTES.md")
           curl -sSf -X POST "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/releases" \
             -H "Authorization: token ${GITEA_TOKEN}" \
             -H "Content-Type: application/json" \
