@@ -4,6 +4,10 @@ on:
   push:
     branches:
       - main
+    paths-ignore:
+      - Cargo.toml
+      - Cargo.lock
+      - CHANGELOG.md
   pull_request:
 
 jobs:
