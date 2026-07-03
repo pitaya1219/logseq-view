@@ -29,16 +29,14 @@ jobs:
           GITEA_TOKEN: ${{ secrets.WORKFLOW_BOT_TOKEN }}
         run: |
           BOT_JSON=$(curl -sf -H "Authorization: token ${GITEA_TOKEN}" "${GITHUB_SERVER_URL}/api/v1/user")
-          BOT_NAME=$(echo "$BOT_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['login'])")
-          BOT_EMAIL=$(echo "$BOT_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['email'])")
-          echo "Pushing as: ${BOT_NAME} <${BOT_EMAIL}>"
+          BOT_NAME=$(echo "$BOT_JSON" | jq -r .login)
+          BOT_EMAIL=$(echo "$BOT_JSON" | jq -r .email)
           git config user.name "${BOT_NAME}"
           git config user.email "${BOT_EMAIL}"
           # actions/checkout sets http.<server>/.extraheader with gitea.token (uid=-2),
-          # which takes priority over URL-embedded credentials and causes the
-          # pre-receive hook to resolve the pusher as the nonexistent Actions
-          # virtual user, crashing with a 500. Unset it so the bot's own
-          # credentials below are used instead.
+          # which takes priority over URL-embedded credentials and crashes the
+          # pre-receive hook (Gitea can't resolve the Actions virtual user). Unset
+          # it so the bot's own credentials below are used for the push instead.
           git config --local --unset-all "http.${GITHUB_SERVER_URL}/.extraheader" || true
           ORIGIN=$(echo "${GITHUB_SERVER_URL}" | sed "s|://|://${BOT_NAME}:${GITEA_TOKEN}@|")
           git remote set-url origin "${ORIGIN}/${GITHUB_REPOSITORY}.git"
@@ -67,13 +65,8 @@ jobs:
 
       - name: Commit, tag, and push
         run: |
-          echo "=== git config check ==="
-          git config user.name
-          git config user.email
           git add Cargo.toml Cargo.lock CHANGELOG.md
           git commit -m "chore(release): v${VERSION}"
-          echo "=== commit author check ==="
-          git log -1 --format="author: %an <%ae>  committer: %cn <%ce>"
           git tag "v${VERSION}"
           git push origin HEAD:main "v${VERSION}"
 
