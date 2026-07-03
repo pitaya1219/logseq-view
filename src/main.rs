@@ -1,5 +1,6 @@
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -10,7 +11,7 @@ use crossterm::{
 };
 use logseq_view::action::map_key;
 use logseq_view::app::{App, Effect, Focus};
-use logseq_view::source::WalkdirGraphSource;
+use logseq_view::source::{GraphSource, WalkdirGraphSource};
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 fn main() -> Result<()> {
@@ -98,7 +99,7 @@ fn event_loop(
                 let update = app.update(action)?;
 
                 for effect in update.effects {
-                    apply_effect(effect);
+                    apply_effect(effect, terminal, &mut app)?;
                 }
 
                 if update.quit {
@@ -111,18 +112,75 @@ fn event_loop(
     Ok(())
 }
 
-/// Interprets a single `Effect` produced by `App::update()`. There are no
-/// variants yet, so this is a no-op hook; future effects (e.g.
-/// `Effect::LaunchEditor`, see #46) that need terminal/process control are
-/// handled here rather than in `app.rs`, keeping the core free of
-/// process/terminal concerns.
-// `Effect` has no variants yet, so this match only has a wildcard arm;
-// `#[non_exhaustive]` still requires it, and clippy would otherwise flag the
-// match as reducible to its body. Kept as a match (not a plain no-op) so #46
-// can add `Effect::LaunchEditor { .. }` as a real arm here.
-#[allow(clippy::match_single_binding)]
-fn apply_effect(effect: Effect) {
+/// Interprets a single `Effect` produced by `App::update()`. Effects that
+/// need terminal/process control are handled here rather than in `app.rs`,
+/// keeping the core free of process/terminal concerns; `terminal` and `app`
+/// are threaded through because acting on an effect (e.g. suspending the TUI
+/// to launch an editor, then re-reading the edited file) needs both.
+fn apply_effect<S: GraphSource>(
+    effect: Effect,
+    terminal: &mut ratatui::Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App<S>,
+) -> Result<()> {
     match effect {
-        _ => {}
+        Effect::LaunchEditor { path } => launch_editor(terminal, app, &path)?,
+    }
+    Ok(())
+}
+
+/// Suspends the TUI, runs `$EDITOR` (falling back to `vi`, then `nano`) on
+/// `path`, restores the TUI, and re-reads/re-parses the file so any edits
+/// made in the external editor are reflected. Errors launching the editor
+/// (e.g. none of the candidates are on `PATH`) are reported but do not crash
+/// the event loop -- the TUI is always restored.
+fn launch_editor<S: GraphSource>(
+    terminal: &mut ratatui::Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App<S>,
+    path: &Path,
+) -> Result<()> {
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+
+    let launch_result = run_editor(path);
+
+    enable_raw_mode()?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    terminal.clear()?;
+
+    if let Err(err) = launch_result {
+        eprintln!("failed to launch editor: {err}");
+        return Ok(());
+    }
+
+    app.reload_current_file()
+}
+
+/// Runs the editor candidates in order (see `editor_candidates`) on `path`,
+/// waiting for the process to exit. Returns an error only if none of the
+/// candidates could be spawned.
+fn run_editor(path: &Path) -> Result<()> {
+    let candidates = editor_candidates();
+    let mut last_err = None;
+
+    for editor in &candidates {
+        match Command::new(editor).arg(path).status() {
+            Ok(_status) => return Ok(()),
+            Err(err) => last_err = Some(err),
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "no editor could be launched (tried: {}): {}",
+        candidates.join(", "),
+        last_err.map(|e| e.to_string()).unwrap_or_default()
+    ))
+}
+
+/// `$EDITOR` if set to a non-empty value, otherwise the fallback chain
+/// `vi`, `nano` (tried in that order).
+fn editor_candidates() -> Vec<String> {
+    match std::env::var("EDITOR") {
+        Ok(editor) if !editor.trim().is_empty() => vec![editor],
+        _ => vec!["vi".to_string(), "nano".to_string()],
     }
 }

@@ -46,6 +46,7 @@ pub enum Action {
     SearchCancel,
     SearchNext,
     SearchPrev,
+    EditCurrentPage,
 }
 
 /// Pure input mapping function.
@@ -61,6 +62,7 @@ pub enum Action {
 ///   Backspace->SearchBackspace, Enter->SearchCommit, Esc->SearchCancel (both focuses)
 /// - Browser `/`->SearchStart; n/N with `browser_has_committed_search`->SearchNext/SearchPrev
 /// - Content `/`->SearchStart, n->SearchNext, N->SearchPrev (always in normal mode)
+/// - Content `e`->EditCurrentPage (always in normal mode, i.e. not while `search_input_active`)
 pub fn map_key(
     focus: Focus,
     key: KeyEvent,
@@ -136,6 +138,7 @@ pub fn map_key(
             KeyCode::Char('/') => Some(Action::SearchStart),
             KeyCode::Char('n') => Some(Action::SearchNext),
             KeyCode::Char('N') => Some(Action::SearchPrev),
+            KeyCode::Char('e') => Some(Action::EditCurrentPage),
             _ => None,
         },
     };
@@ -372,6 +375,32 @@ mod tests {
         let (action, pending) =
             map_key(Focus::Content, key(KeyCode::Char('g')), true, false, false);
         assert_eq!(action, Some(Action::ContentTop));
+        assert!(!pending);
+    }
+
+    #[test]
+    fn content_e_maps_to_edit_current_page() {
+        let (action, pending) =
+            map_key(Focus::Content, key(KeyCode::Char('e')), false, false, false);
+        assert_eq!(action, Some(Action::EditCurrentPage));
+        assert!(!pending);
+    }
+
+    #[test]
+    fn content_e_in_search_input_mode_is_input_not_edit() {
+        // While typing a search query, `e` must be inserted, not trigger edit.
+        let (action, pending) =
+            map_key(Focus::Content, key(KeyCode::Char('e')), false, true, false);
+        assert_eq!(action, Some(Action::SearchInput('e')));
+        assert!(!pending);
+    }
+
+    #[test]
+    fn browser_e_no_action() {
+        // `e` is only bound in Content focus.
+        let (action, pending) =
+            map_key(Focus::Browser, key(KeyCode::Char('e')), false, false, false);
+        assert_eq!(action, None);
         assert!(!pending);
     }
 

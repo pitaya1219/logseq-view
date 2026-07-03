@@ -14,14 +14,14 @@ pub enum Focus {
 ///
 /// This is the TEA "Cmd" equivalent: `update()` stays pure state transition +
 /// data, and anything that touches the terminal or spawns a process is
-/// described here and interpreted by the shell's event loop. There are no
-/// variants yet (this is plumbing landed ahead of the first real effect,
-/// e.g. `LaunchEditor { path }`), but the type is forward-compatible via
-/// `#[non_exhaustive]` so adding one is not a breaking change for callers
-/// that already match exhaustively elsewhere.
-#[non_exhaustive]
+/// described here and interpreted by the shell's event loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Effect {}
+pub enum Effect {
+    /// Launch `$EDITOR` (with a fallback chain) on `path`, suspending the TUI
+    /// for the duration. `main.rs` owns the terminal/process control; `app.rs`
+    /// only describes the intent.
+    LaunchEditor { path: PathBuf },
+}
 
 /// The result of a single `update()` call: whether the app should quit, plus
 /// any effects for `main.rs` to execute.
@@ -158,15 +158,44 @@ impl<S: GraphSource> App<S> {
         Ok(())
     }
 
+    /// Re-reads and re-parses the currently open file (if any) from the
+    /// `GraphSource`, e.g. after the file was edited externally via
+    /// `Effect::LaunchEditor`. Unlike `load_file`, this preserves the scroll
+    /// position on a best-effort basis, clamping it to the new content
+    /// length instead of resetting to the top.
+    pub fn reload_current_file(&mut self) -> Result<()> {
+        let Some(path) = self.current_file.clone() else {
+            return Ok(());
+        };
+        let content = self.source.read(&path)?;
+        self.content_lines = parse_file(&content);
+        let max = self.content_lines.len().saturating_sub(1);
+        self.content_scroll = self.content_scroll.min(max);
+        Ok(())
+    }
+
     /// Main update function that handles all actions.
     /// Returns an `Update` describing whether the app should quit and any
     /// effects for `main.rs` to execute.
     pub fn update(&mut self, action: Action) -> Result<Update> {
+        let effects = self.effects_for(&action);
         let quit = self.update_quit(action)?;
-        Ok(Update {
-            quit,
-            effects: Vec::new(),
-        })
+        Ok(Update { quit, effects })
+    }
+
+    /// Computes the effects (if any) that `action` should produce, without
+    /// mutating state or performing the effect itself. Kept separate from
+    /// `update_quit` so the core stays a pure state transition: it only
+    /// *describes* the effect (e.g. `Effect::LaunchEditor`); `main.rs` is
+    /// responsible for actually launching a process or touching the terminal.
+    fn effects_for(&self, action: &Action) -> Vec<Effect> {
+        match action {
+            Action::EditCurrentPage => match &self.current_file {
+                Some(path) => vec![Effect::LaunchEditor { path: path.clone() }],
+                None => Vec::new(),
+            },
+            _ => Vec::new(),
+        }
     }
 
     /// Applies the action to the model, returning whether the app should quit.
@@ -267,6 +296,9 @@ impl<S: GraphSource> App<S> {
                 }
                 Ok(false)
             }
+            // The effect (if any) is computed by `effects_for`; here we only
+            // decide whether to quit, which is always "no" for this action.
+            Action::EditCurrentPage => Ok(false),
         }
     }
 
@@ -948,6 +980,64 @@ mod tests {
         let mut app = make_app();
         let should_quit = app.update(Action::Quit).unwrap().quit;
         assert!(should_quit);
+    }
+
+    #[test]
+    fn reload_current_file_reparses_and_clamps_scroll() {
+        let mut source = FakeGraphSource::new();
+        let path = PathBuf::from("/graph/pages/foo.md");
+        source.add_file(path.clone(), "line one\nline two\n");
+
+        let mut app = App::new(PathBuf::from("/graph"), source).unwrap();
+        app.current_file = Some(path);
+        // Simulate stale state left over from a longer previous version of
+        // the file (e.g. before an external edit shortened it).
+        app.content_lines = dummy_lines(50);
+        app.content_scroll = 40;
+
+        app.reload_current_file().unwrap();
+
+        assert_eq!(app.content_lines.len(), 2);
+        assert_eq!(app.content_scroll, 1); // clamped to new last-line index
+    }
+
+    #[test]
+    fn reload_current_file_without_current_file_is_noop() {
+        let mut app = make_app();
+        app.content_lines = dummy_lines(5);
+        app.content_scroll = 3;
+
+        app.reload_current_file().unwrap();
+
+        assert_eq!(app.content_lines.len(), 5);
+        assert_eq!(app.content_scroll, 3);
+    }
+
+    #[test]
+    fn update_edit_current_page_with_file_returns_launch_editor_effect() {
+        let mut app = make_app();
+        app.current_file = Some(PathBuf::from("/graph/pages/foo.md"));
+
+        let update = app.update(Action::EditCurrentPage).unwrap();
+
+        assert!(!update.quit);
+        assert_eq!(
+            update.effects,
+            vec![Effect::LaunchEditor {
+                path: PathBuf::from("/graph/pages/foo.md")
+            }]
+        );
+    }
+
+    #[test]
+    fn update_edit_current_page_without_file_returns_no_effect() {
+        let mut app = make_app();
+        app.current_file = None;
+
+        let update = app.update(Action::EditCurrentPage).unwrap();
+
+        assert!(!update.quit);
+        assert!(update.effects.is_empty());
     }
 
     #[test]
