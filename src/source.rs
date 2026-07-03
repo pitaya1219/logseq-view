@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -10,6 +11,10 @@ pub struct Entry {
 pub trait GraphSource {
     fn children(&self, dir: &Path) -> anyhow::Result<Vec<Entry>>;
     fn read(&self, path: &Path) -> anyhow::Result<String>;
+    /// Writes `contents` to `path`, overwriting any existing content. Keeps
+    /// fs access on the port rather than in `main.rs`, so writing (e.g. the
+    /// block-edit flow's splice result) stays testable via `FakeGraphSource`.
+    fn write(&self, path: &Path, contents: &str) -> anyhow::Result<()>;
 }
 
 /// URL decode a string, handling percent-encoded characters
@@ -101,24 +106,32 @@ impl GraphSource for WalkdirGraphSource {
         let content = std::fs::read_to_string(path)?;
         Ok(content)
     }
+
+    fn write(&self, path: &Path, contents: &str) -> anyhow::Result<()> {
+        std::fs::write(path, contents)?;
+        Ok(())
+    }
 }
 
 /// In-memory implementation of GraphSource for testing
 pub struct FakeGraphSource {
-    files: HashMap<PathBuf, String>,
+    // `RefCell` so `write` (part of the `GraphSource` trait, `&self`) can
+    // mutate the in-memory file map like a real fs write would, while
+    // `read`/`children` stay simple immutable borrows.
+    files: RefCell<HashMap<PathBuf, String>>,
     dirs: HashMap<PathBuf, Vec<PathBuf>>,
 }
 
 impl FakeGraphSource {
     pub fn new() -> Self {
         Self {
-            files: HashMap::new(),
+            files: RefCell::new(HashMap::new()),
             dirs: HashMap::new(),
         }
     }
 
     pub fn add_file(&mut self, path: PathBuf, content: &str) {
-        self.files.insert(path, content.to_string());
+        self.files.get_mut().insert(path, content.to_string());
     }
 
     pub fn add_dir(&mut self, path: PathBuf, children: Vec<PathBuf>) {
@@ -131,7 +144,7 @@ impl FakeGraphSource {
 
         for (child_path, is_dir, content) in entries {
             if !is_dir {
-                self.files.insert(child_path, content.to_string());
+                self.files.get_mut().insert(child_path, content.to_string());
             }
         }
     }
@@ -182,9 +195,17 @@ impl GraphSource for FakeGraphSource {
 
     fn read(&self, path: &Path) -> anyhow::Result<String> {
         self.files
+            .borrow()
             .get(path)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("File not found: {}", path.display()))
+    }
+
+    fn write(&self, path: &Path, contents: &str) -> anyhow::Result<()> {
+        self.files
+            .borrow_mut()
+            .insert(path.to_path_buf(), contents.to_string());
+        Ok(())
     }
 }
 
@@ -248,5 +269,28 @@ mod tests {
         let names: Vec<&str> = children.iter().map(|e| e.name.as_str()).collect();
 
         assert_eq!(names, vec!["file_a", "file_b", "file_c"]);
+    }
+
+    // --- write ---
+
+    #[test]
+    fn fake_graph_source_write_then_read_round_trips() {
+        let mut source = FakeGraphSource::new();
+        let path = PathBuf::from("/graph/pages/foo.md");
+        source.add_file(path.clone(), "original content");
+
+        source.write(&path, "new content").unwrap();
+
+        assert_eq!(source.read(&path).unwrap(), "new content");
+    }
+
+    #[test]
+    fn fake_graph_source_write_creates_new_file() {
+        let source = FakeGraphSource::new();
+        let path = PathBuf::from("/graph/pages/new.md");
+
+        source.write(&path, "hello").unwrap();
+
+        assert_eq!(source.read(&path).unwrap(), "hello");
     }
 }

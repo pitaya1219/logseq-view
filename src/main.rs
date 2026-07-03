@@ -11,6 +11,7 @@ use crossterm::{
 };
 use logseq_view::action::map_key;
 use logseq_view::app::{App, Effect, Focus};
+use logseq_view::parser::splice_raw_lines;
 use logseq_view::source::{GraphSource, WalkdirGraphSource};
 use ratatui::{backend::CrosstermBackend, Terminal};
 
@@ -124,8 +125,34 @@ fn apply_effect<S: GraphSource>(
 ) -> Result<()> {
     match effect {
         Effect::LaunchEditor { path } => launch_editor(terminal, app, &path)?,
+        Effect::EditBlock {
+            path,
+            raw_start,
+            raw_end,
+        } => launch_block_editor(terminal, app, &path, raw_start, raw_end)?,
     }
     Ok(())
+}
+
+/// Suspends the TUI (leaves raw mode + the alternate screen), runs `f`, then
+/// restores the TUI (raw mode + alternate screen + `terminal.clear()`)
+/// regardless of whether `f` succeeded. Shared by page-edit (`launch_editor`)
+/// and block-edit (`launch_block_editor`) so both go through the exact same
+/// suspend/resume dance around `$EDITOR`.
+fn with_suspended_terminal(
+    terminal: &mut ratatui::Terminal<CrosstermBackend<io::Stdout>>,
+    f: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+
+    let result = f();
+
+    enable_raw_mode()?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    terminal.clear()?;
+
+    result
 }
 
 /// Suspends the TUI, runs `$EDITOR` (falling back to `vi`, then `nano`) on
@@ -138,14 +165,7 @@ fn launch_editor<S: GraphSource>(
     app: &mut App<S>,
     path: &Path,
 ) -> Result<()> {
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-
-    let launch_result = run_editor(path);
-
-    enable_raw_mode()?;
-    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
-    terminal.clear()?;
+    let launch_result = with_suspended_terminal(terminal, || run_editor(path));
 
     if let Err(err) = launch_result {
         eprintln!("failed to launch editor: {err}");
@@ -153,6 +173,101 @@ fn launch_editor<S: GraphSource>(
     }
 
     app.reload_current_file()
+}
+
+/// Handles `Effect::EditBlock`: reads the current file through the
+/// `GraphSource` port (via `App::read_file`), extracts just the block's raw
+/// lines `[raw_start, raw_end)`, writes them to a scratch temp file, suspends
+/// the TUI to edit that temp file in `$EDITOR` (reusing
+/// `with_suspended_terminal`/`run_editor`, exactly like page-edit), splices
+/// the edited block back into the full original file with the pure
+/// `splice_raw_lines`, writes the result back through the `GraphSource` port
+/// (`App::write_file`), and reloads. Temp-file creation is a legitimate
+/// shell-side concern kept here rather than in the pure core; the temp file
+/// is best-effort cleaned up afterwards. Errors at any step are reported but
+/// never crash the event loop -- the TUI is always restored first.
+fn launch_block_editor<S: GraphSource>(
+    terminal: &mut ratatui::Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App<S>,
+    path: &Path,
+    raw_start: usize,
+    raw_end: usize,
+) -> Result<()> {
+    let original = match app.read_file(path) {
+        Ok(content) => content,
+        Err(err) => {
+            eprintln!("failed to read file for block edit: {err}");
+            return Ok(());
+        }
+    };
+
+    let lines: Vec<&str> = original.lines().collect();
+    let clamped_start = raw_start.min(lines.len());
+    let clamped_end = raw_end.clamp(clamped_start, lines.len());
+    let mut block_text = lines[clamped_start..clamped_end].join("\n");
+    if !block_text.is_empty() {
+        block_text.push('\n');
+    }
+
+    let temp_path = block_temp_path(path);
+    if let Err(err) = std::fs::write(&temp_path, &block_text) {
+        eprintln!("failed to create temp file for block edit: {err}");
+        return Ok(());
+    }
+
+    let launch_result = with_suspended_terminal(terminal, || run_editor(&temp_path));
+
+    let result = finish_block_edit(
+        app,
+        path,
+        &original,
+        clamped_start,
+        clamped_end,
+        &temp_path,
+        launch_result,
+    );
+
+    // Best-effort cleanup -- a leftover temp file is harmless, so ignore errors here.
+    let _ = std::fs::remove_file(&temp_path);
+
+    if let Err(err) = result {
+        eprintln!("failed to edit block: {err}");
+    }
+
+    Ok(())
+}
+
+/// The post-editor part of the block-edit flow: read back the temp file,
+/// splice it into `original`, write the result, and reload. Split out of
+/// `launch_block_editor` purely so temp-file cleanup there can run
+/// unconditionally via a single `?`-free `result` binding.
+fn finish_block_edit<S: GraphSource>(
+    app: &mut App<S>,
+    path: &Path,
+    original: &str,
+    raw_start: usize,
+    raw_end: usize,
+    temp_path: &Path,
+    launch_result: Result<()>,
+) -> Result<()> {
+    launch_result?;
+    let edited = std::fs::read_to_string(temp_path)?;
+    let new_content = splice_raw_lines(original, raw_start, raw_end, &edited);
+    app.write_file(path, &new_content)?;
+    app.reload_current_file()
+}
+
+/// A scratch temp-file path for editing just one block of `path`, derived
+/// from its file stem/extension plus the current process id (cheap
+/// uniqueness -- avoids collisions between concurrent instances without
+/// pulling in a random/uuid dependency).
+fn block_temp_path(path: &Path) -> PathBuf {
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("block");
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("md");
+    std::env::temp_dir().join(format!(
+        "logseq-view-block-{stem}-{}.{ext}",
+        std::process::id()
+    ))
 }
 
 /// Runs the editor candidates in order (see `editor_candidates`) on `path`,

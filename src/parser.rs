@@ -22,12 +22,25 @@ impl TaskState {
     }
 }
 
-#[derive(Debug, Clone)]
+/// A single logical line of parsed content.
+///
+/// `src_start`/`src_end` record the RAW-file line range this `ParsedLine`
+/// was parsed from, as a 0-based, HALF-OPEN range `[src_start, src_end)`
+/// (same convention as `app::block_range_at`). For an ordinary line this is
+/// exactly one raw line (`src_end == src_start + 1`). A fenced code block is
+/// FOLDED into a single `ParsedLine` (see `parse_file`), so its span covers
+/// every raw line from the opening ` ``` ` fence through the closing fence
+/// (or through EOF, if unterminated) — `content_lines` index therefore does
+/// NOT correspond 1:1 with raw file line numbers, which is exactly what
+/// these fields exist to bridge.
+#[derive(Debug, Clone, Default)]
 pub struct ParsedLine {
     pub indent: usize,
     pub is_bullet: bool,
     pub task: Option<TaskState>,
     pub segments: Vec<Segment>,
+    pub src_start: usize,
+    pub src_end: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -68,8 +81,12 @@ pub fn parse_file(content: &str) -> Vec<ParsedLine> {
     let mut in_code_block = false;
     let mut code_lang = String::new();
     let mut code_buf: Vec<String> = Vec::new();
+    // Raw line index (0-based) where the currently-open code block's opening
+    // fence was seen; combined with the current `raw_idx` this gives the
+    // folded block's `[src_start, src_end)` span.
+    let mut code_block_start: usize = 0;
 
-    for raw in content.lines() {
+    for (raw_idx, raw) in content.lines().enumerate() {
         if in_code_block {
             if raw.trim_start().starts_with("```") {
                 let code = code_buf.join("\n");
@@ -78,6 +95,8 @@ pub fn parse_file(content: &str) -> Vec<ParsedLine> {
                     is_bullet: false,
                     task: None,
                     segments: vec![Segment::Code(format!("```{}\n{}\n```", code_lang, code))],
+                    src_start: code_block_start,
+                    src_end: raw_idx + 1,
                 });
                 code_buf.clear();
                 in_code_block = false;
@@ -92,6 +111,7 @@ pub fn parse_file(content: &str) -> Vec<ParsedLine> {
         if trimmed.starts_with("```") {
             code_lang = trimmed.trim_start_matches('`').to_string();
             in_code_block = true;
+            code_block_start = raw_idx;
             continue;
         }
 
@@ -105,6 +125,8 @@ pub fn parse_file(content: &str) -> Vec<ParsedLine> {
                 is_bullet: false,
                 task: None,
                 segments: vec![],
+                src_start: raw_idx,
+                src_end: raw_idx + 1,
             });
             continue;
         }
@@ -127,6 +149,8 @@ pub fn parse_file(content: &str) -> Vec<ParsedLine> {
                     is_bullet,
                     task,
                     segments: vec![Segment::Property(key.to_string(), val.to_string())],
+                    src_start: raw_idx,
+                    src_end: raw_idx + 1,
                 });
                 continue;
             }
@@ -137,21 +161,77 @@ pub fn parse_file(content: &str) -> Vec<ParsedLine> {
             is_bullet,
             task,
             segments: parse_inline(rest),
+            src_start: raw_idx,
+            src_end: raw_idx + 1,
         });
     }
 
-    // Handle unterminated code block at EOF
+    // Handle unterminated code block at EOF: the fold spans the opening
+    // fence line plus every buffered content line (there is no closing
+    // fence to include).
     if in_code_block && !code_buf.is_empty() {
         let code = code_buf.join("\n");
+        let src_end = code_block_start + 1 + code_buf.len();
         lines.push(ParsedLine {
             indent: 0,
             is_bullet: false,
             task: None,
             segments: vec![Segment::Code(format!("```{}\n{}\n```", code_lang, code))],
+            src_start: code_block_start,
+            src_end,
         });
     }
 
     lines
+}
+
+/// Replaces the raw lines in the half-open range `[raw_start, raw_end)` of
+/// `original` (same convention as `ParsedLine::src_start`/`src_end`) with
+/// `replacement`, returning the new full file content. Pure and
+/// framework-free — no fs access.
+///
+/// Normalization rules:
+/// - `replacement`'s own lines are read via `str::lines()`, which already
+///   ignores a single trailing newline (if present) and strips any `\r`
+///   before `\n` — so callers may pass editor output with or without a
+///   final newline, and with LF or CRLF endings, without producing a stray
+///   blank line or gluing the replacement to the following line.
+/// - The line-ending style of the OUTPUT (`\n` vs `\r\n`) always matches
+///   `original`'s, regardless of `replacement`'s own line endings.
+/// - The OUTPUT's trailing-newline state (whether it ends with a newline or
+///   not) always matches `original`'s trailing-newline state, regardless of
+///   `replacement` or of which lines were replaced (including the last
+///   line/EOF).
+/// - `raw_start == raw_end` inserts `replacement` at that position without
+///   removing any original line. Out-of-range indices are clamped rather
+///   than panicking.
+pub fn splice_raw_lines(
+    original: &str,
+    raw_start: usize,
+    raw_end: usize,
+    replacement: &str,
+) -> String {
+    let crlf = original.contains("\r\n");
+    let trailing_newline = original.ends_with('\n');
+    let sep = if crlf { "\r\n" } else { "\n" };
+
+    let original_lines: Vec<&str> = original.lines().collect();
+    let raw_start = raw_start.min(original_lines.len());
+    let raw_end = raw_end.clamp(raw_start, original_lines.len());
+
+    let replacement_lines: Vec<&str> = replacement.lines().collect();
+
+    let mut new_lines: Vec<&str> =
+        Vec::with_capacity(raw_start + replacement_lines.len() + (original_lines.len() - raw_end));
+    new_lines.extend_from_slice(&original_lines[..raw_start]);
+    new_lines.extend_from_slice(&replacement_lines);
+    new_lines.extend_from_slice(&original_lines[raw_end..]);
+
+    let mut result = new_lines.join(sep);
+    if trailing_newline {
+        result.push_str(sep);
+    }
+    result
 }
 
 /// Extract plain text from a ParsedLine's segments for search purposes.
@@ -730,6 +810,7 @@ mod tests {
             is_bullet: false,
             task: None,
             segments: vec![Segment::Plain("Hello world".to_string())],
+            ..Default::default()
         };
         assert_eq!(line_to_plain_text(&line), "Hello world");
     }
@@ -748,6 +829,7 @@ mod tests {
                 Segment::Plain(" and ".to_string()),
                 Segment::Bold("bold".to_string()),
             ],
+            ..Default::default()
         };
         assert_eq!(
             line_to_plain_text(&line),
@@ -766,6 +848,7 @@ mod tests {
                 Segment::Code("code here".to_string()),
                 Segment::Plain(" in text".to_string()),
             ],
+            ..Default::default()
         };
         assert_eq!(line_to_plain_text(&line), "Use code here in text");
     }
@@ -777,6 +860,7 @@ mod tests {
             is_bullet: false,
             task: None,
             segments: vec![Segment::Property("key".to_string(), "value".to_string())],
+            ..Default::default()
         };
         assert_eq!(line_to_plain_text(&line), "key:: value");
     }
@@ -792,6 +876,7 @@ mod tests {
                 Segment::BlockRef("block-id-123".to_string()),
                 Segment::Plain(" for details".to_string()),
             ],
+            ..Default::default()
         };
         assert_eq!(line_to_plain_text(&line), "See block-id-123 for details");
     }
@@ -803,6 +888,7 @@ mod tests {
             is_bullet: false,
             task: None,
             segments: vec![],
+            ..Default::default()
         };
         assert_eq!(line_to_plain_text(&line), "");
     }
@@ -818,6 +904,7 @@ mod tests {
                 Segment::Plain(" and ".to_string()),
                 Segment::Bold("bold".to_string()),
             ],
+            ..Default::default()
         };
         assert_eq!(line_to_plain_text(&line), "italic and bold");
     }
@@ -843,6 +930,7 @@ mod tests {
             is_bullet: false,
             task: Some(TaskState::Todo),
             segments: vec![Segment::Plain("buy milk".to_string())],
+            ..Default::default()
         };
         assert_eq!(line_to_plain_text(&line), "TODO buy milk");
     }
@@ -854,6 +942,7 @@ mod tests {
             is_bullet: false,
             task: Some(TaskState::Done),
             segments: vec![Segment::Plain("finished task".to_string())],
+            ..Default::default()
         };
         assert_eq!(line_to_plain_text(&line), "DONE finished task");
     }
@@ -865,6 +954,7 @@ mod tests {
             is_bullet: false,
             task: Some(TaskState::Cancelled),
             segments: vec![Segment::Plain("abandoned".to_string())],
+            ..Default::default()
         };
         assert_eq!(line_to_plain_text(&line), "CANCELLED abandoned");
     }
@@ -880,10 +970,190 @@ mod tests {
                 Segment::PageLink("documentation".to_string()),
                 Segment::Plain(" tomorrow".to_string()),
             ],
+            ..Default::default()
         };
         assert_eq!(
             line_to_plain_text(&line),
             "LATER Review documentation tomorrow"
         );
+    }
+
+    // ============ ParsedLine source-span tests (parse_file) ============
+
+    #[test]
+    fn span_plain_line_is_single_raw_line() {
+        let result = parse_file("Hello world");
+        assert_eq!(result[0].src_start, 0);
+        assert_eq!(result[0].src_end, 1);
+    }
+
+    #[test]
+    fn span_multiple_plain_lines_track_raw_index() {
+        let result = parse_file("first\nsecond\nthird");
+        assert_eq!(result.len(), 3);
+        assert_eq!((result[0].src_start, result[0].src_end), (0, 1));
+        assert_eq!((result[1].src_start, result[1].src_end), (1, 2));
+        assert_eq!((result[2].src_start, result[2].src_end), (2, 3));
+    }
+
+    #[test]
+    fn span_nested_indented_lines() {
+        let content = "- A\n  - A1\n    - A1a\n  - A2\n- B";
+        let result = parse_file(content);
+        assert_eq!(result.len(), 5);
+        for (i, line) in result.iter().enumerate() {
+            assert_eq!(line.src_start, i);
+            assert_eq!(line.src_end, i + 1);
+        }
+    }
+
+    #[test]
+    fn span_blank_line() {
+        let result = parse_file("Line one\n\nLine three");
+        assert_eq!((result[1].src_start, result[1].src_end), (1, 2));
+    }
+
+    #[test]
+    fn span_property_line() {
+        let result = parse_file("intro\nkey:: value\nmore");
+        assert_eq!((result[1].src_start, result[1].src_end), (1, 2));
+    }
+
+    #[test]
+    fn span_fenced_code_block_covers_all_raw_lines() {
+        // Raw lines: 0 "before", 1 "```rust", 2 "fn main() {", 3 "  x();",
+        // 4 "}", 5 "```", 6 "after" -- the folded ParsedLine for the code
+        // block must span [1, 6) (opening fence through closing fence).
+        let content = "before\n```rust\nfn main() {\n  x();\n}\n```\nafter";
+        let result = parse_file(content);
+        assert_eq!(result.len(), 3); // before, code block, after
+        assert_eq!((result[0].src_start, result[0].src_end), (0, 1));
+        match &result[1].segments[0] {
+            Segment::Code(code) => assert!(code.contains("fn main")),
+            _ => panic!("expected Code segment"),
+        }
+        assert_eq!((result[1].src_start, result[1].src_end), (1, 6));
+        assert_eq!((result[2].src_start, result[2].src_end), (6, 7));
+    }
+
+    #[test]
+    fn span_multiple_code_blocks_each_get_own_span() {
+        let content = "```rust\nfn a() {}\n```\ngap\n```python\nprint(1)\nprint(2)\n```";
+        let result = parse_file(content);
+        // 0: code block 1 (raw 0..3), 1: "gap" (raw 3..4), 2: code block 2 (raw 4..8)
+        assert_eq!(result.len(), 3);
+        assert_eq!((result[0].src_start, result[0].src_end), (0, 3));
+        assert_eq!((result[1].src_start, result[1].src_end), (3, 4));
+        assert_eq!((result[2].src_start, result[2].src_end), (4, 8));
+        match &result[2].segments[0] {
+            Segment::Code(code) => assert!(code.contains("python")),
+            _ => panic!("expected Code segment"),
+        }
+    }
+
+    #[test]
+    fn span_unterminated_code_block_spans_to_eof() {
+        // Raw lines: 0 "```rust", 1 "fn main() {", 2 "  x();" (no closing fence)
+        let content = "```rust\nfn main() {\n  x();";
+        let result = parse_file(content);
+        assert_eq!(result.len(), 1);
+        assert_eq!((result[0].src_start, result[0].src_end), (0, 3));
+    }
+
+    // ============ splice_raw_lines tests ============
+
+    #[test]
+    fn splice_middle_block_replacement() {
+        let original = "L0\nL1\nL2\nL3\nL4\n";
+        let result = splice_raw_lines(original, 1, 3, "NEW\n");
+        assert_eq!(result, "L0\nNEW\nL3\nL4\n");
+    }
+
+    #[test]
+    fn splice_first_block() {
+        let original = "L0\nL1\nL2\n";
+        let result = splice_raw_lines(original, 0, 1, "FIRST\n");
+        assert_eq!(result, "FIRST\nL1\nL2\n");
+    }
+
+    #[test]
+    fn splice_last_block_at_eof() {
+        let original = "L0\nL1\nL2\n";
+        let result = splice_raw_lines(original, 1, 3, "TAIL\n");
+        assert_eq!(result, "L0\nTAIL\n");
+    }
+
+    #[test]
+    fn splice_preserves_trailing_newline_present() {
+        let original = "L0\nL1\nL2\n";
+        let result = splice_raw_lines(original, 1, 2, "MID");
+        assert!(result.ends_with('\n'));
+        assert_eq!(result, "L0\nMID\nL2\n");
+    }
+
+    #[test]
+    fn splice_preserves_no_trailing_newline() {
+        let original = "L0\nL1\nL2"; // no trailing newline
+        let result = splice_raw_lines(original, 2, 3, "NEW");
+        assert!(!result.ends_with('\n'));
+        assert_eq!(result, "L0\nL1\nNEW");
+    }
+
+    #[test]
+    fn splice_no_trailing_newline_replacing_middle_still_no_trailing() {
+        let original = "L0\nL1\nL2";
+        let result = splice_raw_lines(original, 1, 2, "MID");
+        assert_eq!(result, "L0\nMID\nL2");
+    }
+
+    #[test]
+    fn splice_crlf_line_endings_preserved() {
+        let original = "L0\r\nL1\r\nL2\r\n";
+        let result = splice_raw_lines(original, 1, 2, "NEW");
+        assert_eq!(result, "L0\r\nNEW\r\nL2\r\n");
+        assert!(!result.contains("\n\n")); // no corrupted/bare LF glue
+    }
+
+    #[test]
+    fn splice_crlf_no_trailing_newline_preserved() {
+        let original = "L0\r\nL1\r\nL2";
+        let result = splice_raw_lines(original, 0, 1, "NEW");
+        assert_eq!(result, "NEW\r\nL1\r\nL2");
+    }
+
+    #[test]
+    fn splice_replacement_without_trailing_newline() {
+        let original = "L0\nL1\nL2\n";
+        let result = splice_raw_lines(original, 1, 2, "NEW");
+        assert_eq!(result, "L0\nNEW\nL2\n");
+    }
+
+    #[test]
+    fn splice_replacement_with_trailing_newline() {
+        let original = "L0\nL1\nL2\n";
+        let result = splice_raw_lines(original, 1, 2, "NEW\n");
+        assert_eq!(result, "L0\nNEW\nL2\n");
+    }
+
+    #[test]
+    fn splice_replacement_multiline() {
+        let original = "L0\nL1\nL2\n";
+        let result = splice_raw_lines(original, 1, 2, "A\nB\nC\n");
+        assert_eq!(result, "L0\nA\nB\nC\nL2\n");
+    }
+
+    #[test]
+    fn splice_whole_file_single_block() {
+        let original = "only line\n";
+        let result = splice_raw_lines(original, 0, 1, "replaced\n");
+        assert_eq!(result, "replaced\n");
+    }
+
+    #[test]
+    fn splice_out_of_range_indices_clamped_not_panicking() {
+        let original = "L0\nL1\n";
+        let result = splice_raw_lines(original, 5, 10, "NEW\n");
+        // Clamped to EOF: appended at the end, nothing removed.
+        assert_eq!(result, "L0\nL1\nNEW\n");
     }
 }

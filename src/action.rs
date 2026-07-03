@@ -47,6 +47,7 @@ pub enum Action {
     SearchNext,
     SearchPrev,
     EditCurrentPage,
+    EditCurrentBlock,
 }
 
 /// Pure input mapping function.
@@ -65,7 +66,8 @@ pub enum Action {
 ///   Backspace->SearchBackspace, Enter->SearchCommit, Esc->SearchCancel (both focuses)
 /// - Browser `/`->SearchStart; n/N with `browser_has_committed_search`->SearchNext/SearchPrev
 /// - Content `/`->SearchStart, n->SearchNext, N->SearchPrev (always in normal mode)
-/// - Content `e`->EditCurrentPage (always in normal mode, i.e. not while `search_input_active`)
+/// - Content `e`->EditCurrentPage, `E` (Shift+e)->EditCurrentBlock (always in
+///   normal mode, i.e. not while `search_input_active`)
 pub fn map_key(
     focus: Focus,
     key: KeyEvent,
@@ -142,6 +144,7 @@ pub fn map_key(
             KeyCode::Char('n') => Some(Action::SearchNext),
             KeyCode::Char('N') => Some(Action::SearchPrev),
             KeyCode::Char('e') => Some(Action::EditCurrentPage),
+            KeyCode::Char('E') => Some(Action::EditCurrentBlock),
             _ => None,
         },
     };
@@ -403,6 +406,32 @@ mod tests {
         // `e` is only bound in Content focus.
         let (action, pending) =
             map_key(Focus::Browser, key(KeyCode::Char('e')), false, false, false);
+        assert_eq!(action, None);
+        assert!(!pending);
+    }
+
+    #[test]
+    fn content_shift_e_maps_to_edit_current_block() {
+        let (action, pending) =
+            map_key(Focus::Content, key(KeyCode::Char('E')), false, false, false);
+        assert_eq!(action, Some(Action::EditCurrentBlock));
+        assert!(!pending);
+    }
+
+    #[test]
+    fn content_shift_e_in_search_input_mode_is_input_not_edit() {
+        // While typing a search query, `E` must be inserted, not trigger a block edit.
+        let (action, pending) =
+            map_key(Focus::Content, key(KeyCode::Char('E')), false, true, false);
+        assert_eq!(action, Some(Action::SearchInput('E')));
+        assert!(!pending);
+    }
+
+    #[test]
+    fn browser_shift_e_no_action() {
+        // `E` is only bound in Content focus.
+        let (action, pending) =
+            map_key(Focus::Browser, key(KeyCode::Char('E')), false, false, false);
         assert_eq!(action, None);
         assert!(!pending);
     }

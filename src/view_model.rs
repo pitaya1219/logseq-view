@@ -261,6 +261,7 @@ mod tests {
                 is_bullet: false,
                 task: None,
                 segments: Vec::new(),
+                ..Default::default()
             })
             .collect()
     }
@@ -743,6 +744,7 @@ mod tests {
             is_bullet: true,
             task: None,
             segments: vec![Segment::Plain(text.to_string())],
+            ..Default::default()
         }
     }
 
@@ -752,6 +754,7 @@ mod tests {
             is_bullet: false,
             task: None,
             segments: vec![Segment::Plain(text.to_string())],
+            ..Default::default()
         }
     }
 
@@ -762,6 +765,7 @@ mod tests {
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain(format!("line {}", i))],
+                ..Default::default()
             })
             .collect()
     }

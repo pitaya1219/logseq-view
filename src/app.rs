@@ -21,6 +21,17 @@ pub enum Effect {
     /// for the duration. `main.rs` owns the terminal/process control; `app.rs`
     /// only describes the intent.
     LaunchEditor { path: PathBuf },
+    /// Launch `$EDITOR` on just the current block: `main.rs` extracts the
+    /// raw lines `[raw_start, raw_end)` (half-open, see `ParsedLine`'s span
+    /// convention) of `path`, edits only that slice in a temp file, then
+    /// splices the result back into `path`. `app.rs` only describes the
+    /// intent and the (pure) computed range; the actual file/temp-file/
+    /// process work lives in `main.rs`.
+    EditBlock {
+        path: PathBuf,
+        raw_start: usize,
+        raw_end: usize,
+    },
 }
 
 /// The result of a single `update()` call: whether the app should quit, plus
@@ -183,6 +194,39 @@ impl<S: GraphSource> App<S> {
         Ok(())
     }
 
+    /// Reads `path` through the `GraphSource` port. Exposed so `main.rs` can
+    /// read raw file content (e.g. for block-level editing) without reaching
+    /// past the port for ad-hoc fs access.
+    pub fn read_file(&self, path: &Path) -> Result<String> {
+        self.source.read(path)
+    }
+
+    /// Writes `contents` to `path` through the `GraphSource` port. See
+    /// `read_file`.
+    pub fn write_file(&self, path: &Path, contents: &str) -> Result<()> {
+        self.source.write(path, contents)
+    }
+
+    /// Maps the current block (see `block_range_at`, content-LINE indices)
+    /// to a RAW-file line range using each `ParsedLine`'s source span:
+    /// `raw_start` is the first content line's `src_start`, `raw_end` is the
+    /// LAST content line's `src_end` (half-open, matching `ParsedLine`'s own
+    /// convention). Returns `None` when no file is open or the content is
+    /// empty.
+    pub fn current_block_src_range(&self) -> Option<(usize, usize)> {
+        self.current_file.as_ref()?;
+        if self.content_lines.is_empty() {
+            return None;
+        }
+        let (start, end) = block_range_at(&self.content_lines, self.content_cursor);
+        if end <= start || start >= self.content_lines.len() {
+            return None;
+        }
+        let raw_start = self.content_lines[start].src_start;
+        let raw_end = self.content_lines[end - 1].src_end;
+        Some((raw_start, raw_end))
+    }
+
     /// Main update function that handles all actions.
     /// Returns an `Update` describing whether the app should quit and any
     /// effects for `main.rs` to execute.
@@ -203,6 +247,16 @@ impl<S: GraphSource> App<S> {
                 Some(path) => vec![Effect::LaunchEditor { path: path.clone() }],
                 None => Vec::new(),
             },
+            Action::EditCurrentBlock => {
+                match (&self.current_file, self.current_block_src_range()) {
+                    (Some(path), Some((raw_start, raw_end))) => vec![Effect::EditBlock {
+                        path: path.clone(),
+                        raw_start,
+                        raw_end,
+                    }],
+                    _ => Vec::new(),
+                }
+            }
             _ => Vec::new(),
         }
     }
@@ -308,6 +362,7 @@ impl<S: GraphSource> App<S> {
             // The effect (if any) is computed by `effects_for`; here we only
             // decide whether to quit, which is always "no" for this action.
             Action::EditCurrentPage => Ok(false),
+            Action::EditCurrentBlock => Ok(false),
         }
     }
 
@@ -844,6 +899,7 @@ mod tests {
                 is_bullet: false,
                 task: None,
                 segments: Vec::new(),
+                ..Default::default()
             })
             .collect()
     }
@@ -972,6 +1028,7 @@ mod tests {
                 is_bullet: true,
                 task: None,
                 segments: Vec::new(),
+                ..Default::default()
             })
             .collect()
     }
@@ -1133,12 +1190,14 @@ mod tests {
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("first line".to_string())],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("target line".to_string())],
+                ..Default::default()
             },
         ];
         app.content_cursor = 0;
@@ -1357,6 +1416,127 @@ mod tests {
 
         assert!(!update.quit);
         assert!(update.effects.is_empty());
+    }
+
+    #[test]
+    fn update_edit_current_block_returns_edit_block_effect_with_computed_range() {
+        let mut app = make_app();
+        app.current_file = Some(PathBuf::from("/graph/pages/foo.md"));
+        // Block: line 0 (parent) has children at raw lines 1 and 2 (each a
+        // single-raw-line ParsedLine by default span == index..index+1), so
+        // the block's raw range should be [0, 3).
+        app.content_lines = lines_with_indents(&[0, 1, 1, 0]);
+        for (i, line) in app.content_lines.iter_mut().enumerate() {
+            line.src_start = i;
+            line.src_end = i + 1;
+        }
+        app.content_cursor = 0;
+
+        let update = app.update(Action::EditCurrentBlock).unwrap();
+
+        assert!(!update.quit);
+        assert_eq!(
+            update.effects,
+            vec![Effect::EditBlock {
+                path: PathBuf::from("/graph/pages/foo.md"),
+                raw_start: 0,
+                raw_end: 3,
+            }]
+        );
+    }
+
+    #[test]
+    fn update_edit_current_block_without_file_returns_no_effect() {
+        let mut app = make_app();
+        app.current_file = None;
+        app.content_lines = dummy_lines(3);
+
+        let update = app.update(Action::EditCurrentBlock).unwrap();
+
+        assert!(!update.quit);
+        assert!(update.effects.is_empty());
+    }
+
+    #[test]
+    fn update_edit_current_block_with_empty_content_returns_no_effect() {
+        let mut app = make_app();
+        app.current_file = Some(PathBuf::from("/graph/pages/foo.md"));
+        app.content_lines = Vec::new();
+
+        let update = app.update(Action::EditCurrentBlock).unwrap();
+
+        assert!(!update.quit);
+        assert!(update.effects.is_empty());
+    }
+
+    #[test]
+    fn current_block_src_range_uses_first_and_last_line_spans() {
+        let mut app = make_app();
+        app.current_file = Some(PathBuf::from("/graph/pages/foo.md"));
+        app.content_lines = lines_with_indents(&[0, 1, 1, 0]);
+        // Simulate a folded code-block child spanning raw lines 1..=5.
+        app.content_lines[1].src_start = 1;
+        app.content_lines[1].src_end = 6;
+        app.content_lines[2].src_start = 6;
+        app.content_lines[2].src_end = 7;
+        app.content_lines[0].src_start = 0;
+        app.content_lines[0].src_end = 1;
+        app.content_cursor = 0;
+
+        let range = app.current_block_src_range();
+        assert_eq!(range, Some((0, 7)));
+    }
+
+    #[test]
+    fn current_block_src_range_none_without_current_file() {
+        let mut app = make_app();
+        app.current_file = None;
+        app.content_lines = dummy_lines(3);
+
+        assert_eq!(app.current_block_src_range(), None);
+    }
+
+    #[test]
+    fn current_block_src_range_none_when_content_empty() {
+        let mut app = make_app();
+        app.current_file = Some(PathBuf::from("/graph/pages/foo.md"));
+        app.content_lines = Vec::new();
+
+        assert_eq!(app.current_block_src_range(), None);
+    }
+
+    /// End-to-end block-edit round trip through the `GraphSource` port
+    /// (`read_file` -> `splice_raw_lines` -> `write_file`), the same
+    /// sequence `main.rs::launch_block_editor` performs around the actual
+    /// `$EDITOR` call. Asserts only the block's own raw lines are replaced
+    /// and every other line survives untouched.
+    #[test]
+    fn block_edit_round_trip_replaces_only_block_raw_range() {
+        let mut source = FakeGraphSource::new();
+        let path = PathBuf::from("/graph/pages/foo.md");
+        source.add_file(
+            path.clone(),
+            "- A\n  - A1\n  - A2\n- B\n- C\n", // block "A" = raw lines 0..3
+        );
+
+        let mut app = App::new(PathBuf::from("/graph"), source).unwrap();
+        app.load_file(&path).unwrap();
+        app.content_cursor = 0; // on block A
+
+        let (raw_start, raw_end) = app.current_block_src_range().unwrap();
+        assert_eq!((raw_start, raw_end), (0, 3));
+
+        let original = app.read_file(&path).unwrap();
+        let new_content =
+            crate::parser::splice_raw_lines(&original, raw_start, raw_end, "- A EDITED\n");
+        app.write_file(&path, &new_content).unwrap();
+        app.reload_current_file().unwrap();
+
+        assert_eq!(
+            app.read_file(&path).unwrap(),
+            "- A EDITED\n- B\n- C\n",
+            "only the block's raw range should be replaced; B and C must survive untouched"
+        );
     }
 
     #[test]
@@ -1822,18 +2002,21 @@ mod tests {
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("first line".to_string())],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("target line".to_string())],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("another line".to_string())],
+                ..Default::default()
             },
         ];
         app.content_scroll = 0;
@@ -1862,12 +2045,14 @@ mod tests {
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("first line".to_string())],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("another line".to_string())],
+                ..Default::default()
             },
         ];
         app.content_scroll = 0;
@@ -1894,18 +2079,21 @@ mod tests {
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("target line 1".to_string())],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("other line".to_string())],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("target line 2".to_string())],
+                ..Default::default()
             },
         ];
         app.content_scroll = 0;
@@ -1934,18 +2122,21 @@ mod tests {
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("target line 1".to_string())],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("other line".to_string())],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("target line 2".to_string())],
+                ..Default::default()
             },
         ];
         app.content_scroll = 2;
@@ -1996,12 +2187,14 @@ mod tests {
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("UPPER CASE TARGET".to_string())],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("lower case line".to_string())],
+                ..Default::default()
             },
         ];
         app.content_scroll = 0;
@@ -2033,12 +2226,14 @@ mod tests {
                     Segment::PageLink("my page".to_string()),
                     Segment::Plain(" here".to_string()),
                 ],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("other line".to_string())],
+                ..Default::default()
             },
         ];
         app.content_scroll = 0;
@@ -2064,6 +2259,7 @@ mod tests {
             is_bullet: false,
             task: None,
             segments: vec![Segment::Plain("test line".to_string())],
+            ..Default::default()
         }];
         app.content_search_query = String::new();
 
@@ -2089,18 +2285,21 @@ mod tests {
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("first line".to_string())],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("target line".to_string())],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("other line".to_string())],
+                ..Default::default()
             },
         ];
         app.content_search_query = "target".to_string();
@@ -2118,24 +2317,28 @@ mod tests {
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("target line 1".to_string())],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("other line".to_string())],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("target line 2".to_string())],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("target line 3".to_string())],
+                ..Default::default()
             },
         ];
         app.content_search_query = "target".to_string();
@@ -2153,12 +2356,14 @@ mod tests {
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("UPPER CASE".to_string())],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("lower case".to_string())],
+                ..Default::default()
             },
         ];
         app.content_search_query = "case".to_string();
@@ -2176,18 +2381,21 @@ mod tests {
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("match 1".to_string())],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("no match here".to_string())],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("match 2".to_string())],
+                ..Default::default()
             },
         ];
         app.content_search_query = "match".to_string();
@@ -2204,18 +2412,21 @@ mod tests {
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("match 1".to_string())],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("match 2".to_string())],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("match 3".to_string())],
+                ..Default::default()
             },
         ];
         app.content_search_query = "match".to_string();
@@ -2239,18 +2450,21 @@ mod tests {
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("match 1".to_string())],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("no match".to_string())],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("match 2".to_string())],
+                ..Default::default()
             },
         ];
         app.content_search_query = "match".to_string();
@@ -2271,6 +2485,7 @@ mod tests {
             is_bullet: false,
             task: None,
             segments: vec![Segment::Plain("no match".to_string())],
+            ..Default::default()
         }];
         app.content_search_query = "zzz".to_string();
 
@@ -2290,18 +2505,21 @@ mod tests {
                 is_bullet: false,
                 task: Some(TaskState::Todo),
                 segments: vec![Segment::Plain("buy milk".to_string())],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("regular line".to_string())],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: Some(TaskState::Done),
                 segments: vec![Segment::Plain("finished".to_string())],
+                ..Default::default()
             },
         ];
         app.content_search_query = "TODO".to_string();
@@ -2321,12 +2539,14 @@ mod tests {
                 is_bullet: false,
                 task: Some(TaskState::Todo),
                 segments: vec![Segment::Plain("buy milk".to_string())],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: Some(TaskState::Done),
                 segments: vec![Segment::Plain("finished".to_string())],
+                ..Default::default()
             },
         ];
         app.content_search_query = "todo".to_string();
@@ -2346,24 +2566,28 @@ mod tests {
                 is_bullet: false,
                 task: Some(TaskState::Todo),
                 segments: vec![Segment::Plain("first".to_string())],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("regular".to_string())],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: Some(TaskState::Done),
                 segments: vec![Segment::Plain("second".to_string())],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: Some(TaskState::Todo),
                 segments: vec![Segment::Plain("third".to_string())],
+                ..Default::default()
             },
         ];
         app.content_search_query = "TODO".to_string();
@@ -2384,12 +2608,14 @@ mod tests {
                 is_bullet: false,
                 task: None,
                 segments: vec![Segment::Plain("regular".to_string())],
+                ..Default::default()
             },
             ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: Some(TaskState::Todo),
                 segments: vec![Segment::Plain("task here".to_string())],
+                ..Default::default()
             },
         ];
         app.content_search_query = "TODO".to_string();
