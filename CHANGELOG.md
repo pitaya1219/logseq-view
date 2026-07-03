@@ -19,6 +19,7 @@
 - Derive git author from WORKFLOW_BOT_TOKEN identity dynamically
 - Unset checkout extraheader before push to avoid uid=-2 pre-receive crash
 - Correct file content (previous commit wrote base64 string literally)
+- Write RELEASE_NOTES.md outside working tree to avoid dirty cargo publish
 
 ### Documentation
 
@@ -56,6 +57,7 @@
 - Restrict clamp methods to pub(crate) and clarify intent with comment
 - Extract quit key handling in event_loop
 - Extract make_file_item helper to deduplicate FileItem construction
+- Remove leftover debug output from bump-and-tag job
 
 ### Styling
 
