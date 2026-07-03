@@ -53,11 +53,16 @@ pub struct App<S: GraphSource> {
     pub current_file: Option<PathBuf>,
     pub content_lines: Vec<ParsedLine>,
     pub content_scroll: usize,
+    /// Absolute line index of the first line of the current block (see
+    /// `block_range_at`). Separate from `content_scroll` (the viewport's top
+    /// line), mirroring `browser_selected` vs. `browser_offset`.
+    pub content_cursor: usize,
 
     // content search state
     pub content_search_active: bool,
     pub content_search_query: String,
     pub content_search_saved_scroll: usize,
+    pub content_search_saved_cursor: usize,
 
     // browser search state
     pub browser_search_active: bool,
@@ -79,9 +84,11 @@ impl<S: GraphSource> App<S> {
             current_file: None,
             content_lines: Vec::new(),
             content_scroll: 0,
+            content_cursor: 0,
             content_search_active: false,
             content_search_query: String::new(),
             content_search_saved_scroll: 0,
+            content_search_saved_cursor: 0,
             browser_search_active: false,
             browser_search_query: String::new(),
             browser_search_saved_selected: 0,
@@ -155,6 +162,7 @@ impl<S: GraphSource> App<S> {
         self.content_lines = parse_file(&content);
         self.current_file = Some(path.to_path_buf());
         self.content_scroll = 0;
+        self.content_cursor = 0;
         Ok(())
     }
 
@@ -171,6 +179,7 @@ impl<S: GraphSource> App<S> {
         self.content_lines = parse_file(&content);
         let max = self.content_lines.len().saturating_sub(1);
         self.content_scroll = self.content_scroll.min(max);
+        self.content_cursor = self.content_cursor.min(max);
         Ok(())
     }
 
@@ -340,21 +349,35 @@ impl<S: GraphSource> App<S> {
         }
     }
 
+    /// Moves the block cursor forward `amount` blocks (see `block_range_at`
+    /// and `next_block_start`). `content_scroll` is untouched here; it is
+    /// made to follow the cursor separately, at render time, by
+    /// `clamp_content_cursor_scroll` — mirroring how `browser_down` only
+    /// touches `browser_selected` and `browser_offset` follows via
+    /// `clamp_browser_scroll`.
     pub(crate) fn content_down(&mut self, amount: usize) {
-        let max = self.content_lines.len().saturating_sub(1);
-        self.content_scroll = (self.content_scroll + amount).min(max);
+        for _ in 0..amount {
+            self.content_cursor = next_block_start(&self.content_lines, self.content_cursor);
+        }
     }
 
+    /// Moves the block cursor backward `amount` blocks. See `content_down`.
     pub(crate) fn content_up(&mut self, amount: usize) {
-        self.content_scroll = self.content_scroll.saturating_sub(amount);
+        for _ in 0..amount {
+            self.content_cursor = prev_block_start(self.content_cursor);
+        }
     }
 
+    /// Moves the cursor to the first block. A deliberate UX change from the
+    /// previous "scroll to top" behavior: this now selects/highlights the
+    /// first block rather than just moving the viewport.
     pub(crate) fn content_top(&mut self) {
-        self.content_scroll = 0;
+        self.content_cursor = 0;
     }
 
+    /// Moves the cursor to the last block (see `content_top`).
     pub(crate) fn content_bottom(&mut self) {
-        self.content_scroll = self.content_lines.len().saturating_sub(1);
+        self.content_cursor = self.content_lines.len().saturating_sub(1);
     }
 
     /// Jump to the top of the current directory scope in the browser.
@@ -416,6 +439,7 @@ impl<S: GraphSource> App<S> {
             self.content_search_active = true;
             self.content_search_query.clear();
             self.content_search_saved_scroll = self.content_scroll;
+            self.content_search_saved_cursor = self.content_cursor;
         }
     }
 
@@ -442,6 +466,7 @@ impl<S: GraphSource> App<S> {
 
         if let Some(matching_line) = self.content_find_next_match(self.content_scroll, true) {
             self.content_scroll = matching_line;
+            self.content_cursor = matching_line;
             self.content_search_active = false;
         }
         // If no match found, stay in search mode
@@ -452,6 +477,7 @@ impl<S: GraphSource> App<S> {
         self.content_search_active = false;
         self.content_search_query.clear();
         self.content_scroll = self.content_search_saved_scroll;
+        self.content_cursor = self.content_search_saved_cursor;
     }
 
     /// Find the next content match (for n key)
@@ -468,6 +494,7 @@ impl<S: GraphSource> App<S> {
 
         if let Some(matching_line) = self.content_find_next_match(start_pos, false) {
             self.content_scroll = matching_line;
+            self.content_cursor = matching_line;
             if self.content_search_active {
                 self.content_search_active = false;
             }
@@ -484,6 +511,7 @@ impl<S: GraphSource> App<S> {
 
         if let Some(matching_line) = self.content_find_prev_match(start_pos, false) {
             self.content_scroll = matching_line;
+            self.content_cursor = matching_line;
             if self.content_search_active {
                 self.content_search_active = false;
             }
@@ -725,12 +753,67 @@ impl<S: GraphSource> App<S> {
         }
     }
 
+    /// Adjusts `content_scroll` so `content_cursor` stays within the visible
+    /// window, mirroring `clamp_browser_scroll`'s selection-follows-viewport
+    /// pattern (`browser_selected` / `browser_offset`) for the content pane
+    /// (`content_cursor` / `content_scroll`).
+    pub(crate) fn clamp_content_cursor_scroll(&mut self, visible_height: usize) {
+        if self.content_cursor < self.content_scroll {
+            self.content_scroll = self.content_cursor;
+        } else if self.content_cursor >= self.content_scroll + visible_height {
+            self.content_scroll = self.content_cursor + 1 - visible_height;
+        }
+    }
+
     pub(crate) fn toggle_focus(&mut self) {
         self.focus = match self.focus {
             Focus::Browser => Focus::Content,
             Focus::Content => Focus::Browser,
         };
     }
+}
+
+/// Computes the `[start, end)` line-index range of the Logseq block that
+/// starts at `line_idx`: the line itself, plus all immediately following
+/// lines whose indent is strictly greater than `lines[line_idx]`'s indent,
+/// stopping at (not including) the next line whose indent is `<=` it.
+///
+/// Every line index is a valid block start under this definition: a leaf
+/// line (nothing more deeply indented follows it) is simply a single-line
+/// block. Shared exactly with the future block-editing feature (#47), so
+/// changes here should stay in lock-step with that definition.
+///
+/// Returns `(line_idx, line_idx)` (an empty range) if `line_idx` is out of
+/// bounds, e.g. an empty file.
+pub fn block_range_at(lines: &[ParsedLine], line_idx: usize) -> (usize, usize) {
+    if line_idx >= lines.len() {
+        return (line_idx, line_idx);
+    }
+    let base_indent = lines[line_idx].indent;
+    let mut end = line_idx + 1;
+    while end < lines.len() && lines[end].indent > base_indent {
+        end += 1;
+    }
+    (line_idx, end)
+}
+
+/// The next block-start line after `line_idx`.
+///
+/// Because every line is a valid block start (see `block_range_at`) and the
+/// file is already stored in depth-first pre-order (a bullet immediately
+/// followed by its own nested children), the next block is simply the next
+/// line — clamped so the cursor stops at the last line rather than running
+/// past the end.
+fn next_block_start(lines: &[ParsedLine], line_idx: usize) -> usize {
+    if lines.is_empty() {
+        return 0;
+    }
+    (line_idx + 1).min(lines.len() - 1)
+}
+
+/// The previous block-start line before `line_idx` (see `next_block_start`).
+fn prev_block_start(line_idx: usize) -> usize {
+    line_idx.saturating_sub(1)
 }
 
 fn make_file_item_from_entry(entry: Entry, depth: usize) -> FileItem {
@@ -847,6 +930,242 @@ mod tests {
         app.content_scroll = 10;
         app.clamp_content_scroll(10);
         assert_eq!(app.content_scroll, 10);
+    }
+
+    // --- clamp_content_cursor_scroll (cursor-follows-viewport, mirrors
+    //     clamp_browser_scroll) ---
+
+    #[test]
+    fn content_cursor_scroll_cursor_before_offset_clamps_up() {
+        let mut app = make_app();
+        app.content_scroll = 5;
+        app.content_cursor = 3;
+        app.clamp_content_cursor_scroll(10);
+        assert_eq!(app.content_scroll, 3);
+    }
+
+    #[test]
+    fn content_cursor_scroll_cursor_past_window_slides_down() {
+        let mut app = make_app();
+        app.content_scroll = 0;
+        app.content_cursor = 10;
+        app.clamp_content_cursor_scroll(5);
+        assert_eq!(app.content_scroll, 6);
+    }
+
+    #[test]
+    fn content_cursor_scroll_cursor_within_window_unchanged() {
+        let mut app = make_app();
+        app.content_scroll = 2;
+        app.content_cursor = 4;
+        app.clamp_content_cursor_scroll(10);
+        assert_eq!(app.content_scroll, 2);
+    }
+
+    // --- block_range_at ---
+
+    fn lines_with_indents(indents: &[usize]) -> Vec<ParsedLine> {
+        indents
+            .iter()
+            .map(|&indent| ParsedLine {
+                indent,
+                is_bullet: true,
+                task: None,
+                segments: Vec::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn block_range_at_single_line_file_is_its_own_block() {
+        let lines = lines_with_indents(&[0]);
+        assert_eq!(block_range_at(&lines, 0), (0, 1));
+    }
+
+    #[test]
+    fn block_range_at_leaf_among_siblings() {
+        // 0:A(0) 1:B(0) 2:C(0) — flat siblings, each its own single-line block.
+        let lines = lines_with_indents(&[0, 0, 0]);
+        assert_eq!(block_range_at(&lines, 0), (0, 1));
+        assert_eq!(block_range_at(&lines, 1), (1, 2));
+        assert_eq!(block_range_at(&lines, 2), (2, 3));
+    }
+
+    #[test]
+    fn block_range_at_single_level_children() {
+        // 0:A(0) 1:A1(1) 2:A2(1) 3:B(0)
+        let lines = lines_with_indents(&[0, 1, 1, 0]);
+        assert_eq!(block_range_at(&lines, 0), (0, 3));
+        assert_eq!(block_range_at(&lines, 1), (1, 2));
+        assert_eq!(block_range_at(&lines, 2), (2, 3));
+        assert_eq!(block_range_at(&lines, 3), (3, 4));
+    }
+
+    #[test]
+    fn block_range_at_nested_multi_level() {
+        // 0:A(0) 1:A1(1) 2:A1a(2) 3:A2(1) 4:B(0)
+        let lines = lines_with_indents(&[0, 1, 2, 1, 0]);
+        assert_eq!(block_range_at(&lines, 0), (0, 4));
+        assert_eq!(block_range_at(&lines, 1), (1, 3));
+        assert_eq!(block_range_at(&lines, 2), (2, 3));
+        assert_eq!(block_range_at(&lines, 3), (3, 4));
+        assert_eq!(block_range_at(&lines, 4), (4, 5));
+    }
+
+    #[test]
+    fn block_range_at_last_line_with_children_extends_to_end() {
+        // 0:A(0) 1:A1(1) 2:A2(1) — block A has no following sibling, extends to EOF.
+        let lines = lines_with_indents(&[0, 1, 1]);
+        assert_eq!(block_range_at(&lines, 0), (0, 3));
+    }
+
+    #[test]
+    fn block_range_at_out_of_bounds_returns_empty_range() {
+        let lines = lines_with_indents(&[0, 1]);
+        assert_eq!(block_range_at(&lines, 5), (5, 5));
+    }
+
+    #[test]
+    fn block_range_at_empty_file_returns_empty_range() {
+        let lines: Vec<ParsedLine> = Vec::new();
+        assert_eq!(block_range_at(&lines, 0), (0, 0));
+    }
+
+    // --- content_down / content_up block-cursor navigation ---
+
+    #[test]
+    fn content_down_advances_cursor_through_nested_lines() {
+        // Per-line DFS-order cursor movement: descending into children is a
+        // normal "next block" step, since block_range_at(parent) only
+        // matters for highlighting the parent's whole subtree, not for
+        // where the cursor is allowed to land.
+        let mut app = make_app();
+        app.content_lines = lines_with_indents(&[0, 1, 1, 0]);
+        app.content_cursor = 0;
+
+        app.content_down(1);
+        assert_eq!(app.content_cursor, 1);
+        app.content_down(1);
+        assert_eq!(app.content_cursor, 2);
+        app.content_down(1);
+        assert_eq!(app.content_cursor, 3);
+    }
+
+    #[test]
+    fn content_down_clamped_at_last_line() {
+        let mut app = make_app();
+        app.content_lines = lines_with_indents(&[0, 1]);
+        app.content_cursor = 1;
+
+        app.content_down(5);
+        assert_eq!(app.content_cursor, 1);
+    }
+
+    #[test]
+    fn content_up_retreats_cursor() {
+        let mut app = make_app();
+        app.content_lines = lines_with_indents(&[0, 1, 1, 0]);
+        app.content_cursor = 3;
+
+        app.content_up(1);
+        assert_eq!(app.content_cursor, 2);
+        app.content_up(1);
+        assert_eq!(app.content_cursor, 1);
+    }
+
+    #[test]
+    fn content_up_clamped_at_zero() {
+        let mut app = make_app();
+        app.content_lines = lines_with_indents(&[0, 1]);
+        app.content_cursor = 0;
+
+        app.content_up(5);
+        assert_eq!(app.content_cursor, 0);
+    }
+
+    #[test]
+    fn content_top_moves_cursor_to_first_block() {
+        let mut app = make_app();
+        app.content_lines = dummy_lines(10);
+        app.content_cursor = 7;
+
+        app.content_top();
+        assert_eq!(app.content_cursor, 0);
+    }
+
+    #[test]
+    fn content_bottom_moves_cursor_to_last_block() {
+        let mut app = make_app();
+        app.content_lines = dummy_lines(10);
+        app.content_cursor = 0;
+
+        app.content_bottom();
+        assert_eq!(app.content_cursor, 9);
+    }
+
+    #[test]
+    fn reload_current_file_clamps_cursor_too() {
+        let mut source = FakeGraphSource::new();
+        let path = PathBuf::from("/graph/pages/foo.md");
+        source.add_file(path.clone(), "line one\nline two\n");
+
+        let mut app = App::new(PathBuf::from("/graph"), source).unwrap();
+        app.current_file = Some(path);
+        app.content_lines = dummy_lines(50);
+        app.content_cursor = 40;
+
+        app.reload_current_file().unwrap();
+
+        assert_eq!(app.content_lines.len(), 2);
+        assert_eq!(app.content_cursor, 1);
+    }
+
+    // --- content search keeps content_cursor in sync with content_scroll ---
+
+    #[test]
+    fn content_search_commit_moves_cursor_to_match() {
+        let mut app = make_app();
+        app.focus = Focus::Content;
+        app.current_file = Some(PathBuf::from("/test/file.md"));
+        app.content_lines = vec![
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("first line".to_string())],
+            },
+            ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![Segment::Plain("target line".to_string())],
+            },
+        ];
+        app.content_cursor = 0;
+
+        app.update(Action::SearchStart).unwrap();
+        app.update(Action::SearchInput('t')).unwrap();
+        app.update(Action::SearchInput('a')).unwrap();
+        app.update(Action::SearchInput('r')).unwrap();
+        app.update(Action::SearchCommit).unwrap();
+
+        assert_eq!(app.content_cursor, 1);
+    }
+
+    #[test]
+    fn content_search_cancel_restores_cursor() {
+        let mut app = make_app();
+        app.focus = Focus::Content;
+        app.current_file = Some(PathBuf::from("/test/file.md"));
+        app.content_lines = dummy_lines(10);
+        app.content_cursor = 5;
+        app.content_scroll = 5;
+
+        app.update(Action::SearchStart).unwrap();
+        app.content_cursor = 8;
+
+        app.update(Action::SearchCancel).unwrap();
+        assert_eq!(app.content_cursor, 5);
     }
 
     // --- File tree tests using FakeGraphSource ---
@@ -1110,48 +1429,58 @@ mod tests {
         assert_eq!(app.browser_selected, 0);
     }
 
+    // NOTE: as of the block-cursor feature (#45), ContentDown/ContentUp/
+    // ContentTop/ContentBottom move `content_cursor` (the block cursor), not
+    // `content_scroll` directly. `content_scroll` now only follows the
+    // cursor at render time via `clamp_content_cursor_scroll`. These tests
+    // supersede the pre-cursor versions that asserted on `content_scroll`.
+
     #[test]
-    fn update_content_down_increments_scroll() {
+    fn update_content_down_moves_cursor_not_scroll() {
         let mut app = make_app();
         app.content_lines = dummy_lines(10);
+        app.content_cursor = 0;
         app.content_scroll = 0;
 
         let should_quit = app.update(Action::ContentDown(1)).unwrap().quit;
         assert!(!should_quit);
-        assert_eq!(app.content_scroll, 1);
-    }
-
-    #[test]
-    fn update_content_up_decrements_scroll() {
-        let mut app = make_app();
-        app.content_lines = dummy_lines(10);
-        app.content_scroll = 5;
-
-        let should_quit = app.update(Action::ContentUp(1)).unwrap().quit;
-        assert!(!should_quit);
-        assert_eq!(app.content_scroll, 4);
-    }
-
-    #[test]
-    fn update_content_top_sets_scroll_to_zero() {
-        let mut app = make_app();
-        app.content_lines = dummy_lines(10);
-        app.content_scroll = 5;
-
-        let should_quit = app.update(Action::ContentTop).unwrap().quit;
-        assert!(!should_quit);
+        assert_eq!(app.content_cursor, 1);
         assert_eq!(app.content_scroll, 0);
     }
 
     #[test]
-    fn update_content_bottom_sets_scroll_to_max() {
+    fn update_content_up_moves_cursor_not_scroll() {
         let mut app = make_app();
         app.content_lines = dummy_lines(10);
-        app.content_scroll = 0;
+        app.content_cursor = 5;
+        app.content_scroll = 5;
+
+        let should_quit = app.update(Action::ContentUp(1)).unwrap().quit;
+        assert!(!should_quit);
+        assert_eq!(app.content_cursor, 4);
+        assert_eq!(app.content_scroll, 5);
+    }
+
+    #[test]
+    fn update_content_top_sets_cursor_to_first_block() {
+        let mut app = make_app();
+        app.content_lines = dummy_lines(10);
+        app.content_cursor = 5;
+
+        let should_quit = app.update(Action::ContentTop).unwrap().quit;
+        assert!(!should_quit);
+        assert_eq!(app.content_cursor, 0);
+    }
+
+    #[test]
+    fn update_content_bottom_sets_cursor_to_last_block() {
+        let mut app = make_app();
+        app.content_lines = dummy_lines(10);
+        app.content_cursor = 0;
 
         let should_quit = app.update(Action::ContentBottom).unwrap().quit;
         assert!(!should_quit);
-        assert_eq!(app.content_scroll, 9);
+        assert_eq!(app.content_cursor, 9);
     }
 
     // --- browser_top / browser_bottom tests ---

@@ -19,11 +19,20 @@ pub struct ScrollbarInfo {
     pub position: usize,
 }
 
-/// Highlight state for a visible line during search
+/// Highlight state for a visible line: search results and/or the block
+/// cursor.
+///
+/// Priority when more than one would apply to the same line (highest
+/// first): `Current` (the active search match) > `Cursor` (the block the
+/// content cursor is on) > `Match` (other search matches) > `None`. Search's
+/// "you are here" wins over the cursor block since it answers a more
+/// specific question ("where's my match"), but the cursor block still shows
+/// through on any of its lines that are merely one of several matches.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LineHighlight {
     None,
     Match,
+    Cursor,
     Current,
 }
 
@@ -109,6 +118,17 @@ fn build_browser_view<S: GraphSource>(app: &mut App<S>, visible_height: usize) -
 }
 
 fn build_content_view<S: GraphSource>(app: &mut App<S>, visible_height: usize) -> ContentView {
+    // The block cursor only drives auto-scroll while content is the focused
+    // pane. This matters beyond cosmetics: `content_scroll` is also driven
+    // independently by content search (jumping to a match line), and
+    // letting an unrelated stale `content_cursor` fight that on every
+    // render would undo the search jump. Content search keeps
+    // `content_cursor` in sync with `content_scroll` itself (see
+    // `content_search_commit` etc.), so gating on focus here is enough to
+    // keep the two mechanisms from stepping on each other.
+    if app.focus == Focus::Content {
+        app.clamp_content_cursor_scroll(visible_height);
+    }
     app.clamp_content_scroll(visible_height);
 
     let title = app
@@ -146,42 +166,48 @@ fn build_content_view<S: GraphSource>(app: &mut App<S>, visible_height: usize) -
     };
 
     // Compute search highlight info using the content search query
-    let (match_count, current_match, line_highlights) = if app.content_search_query.is_empty() {
-        (0, None, vec![LineHighlight::None; visible_lines.len()])
+    let match_indices = if app.content_search_query.is_empty() {
+        Vec::new()
     } else {
-        let match_indices = app.match_line_indices();
-        let match_count = match_indices.len();
-        let current_match = app.current_match_position();
-
-        let current_match_line = if current_match.is_some() {
-            Some(app.content_scroll)
-        } else {
-            None
-        };
-
-        let line_highlights: Vec<LineHighlight> = visible_lines
-            .iter()
-            .enumerate()
-            .map(|(visible_idx, _line)| {
-                let absolute_idx = app.content_scroll + visible_idx;
-                if let Some(current_line) = current_match_line {
-                    if absolute_idx == current_line {
-                        LineHighlight::Current
-                    } else if match_indices.contains(&absolute_idx) {
-                        LineHighlight::Match
-                    } else {
-                        LineHighlight::None
-                    }
-                } else if match_indices.contains(&absolute_idx) {
-                    LineHighlight::Match
-                } else {
-                    LineHighlight::None
-                }
-            })
-            .collect();
-
-        (match_count, current_match, line_highlights)
+        app.match_line_indices()
     };
+    let match_count = match_indices.len();
+    let current_match = if app.content_search_query.is_empty() {
+        None
+    } else {
+        app.current_match_position()
+    };
+    let current_match_line = if current_match.is_some() {
+        Some(app.content_scroll)
+    } else {
+        None
+    };
+
+    // The cursor block only lights up while content is focused (see the
+    // comment above `clamp_content_cursor_scroll`'s call site) — an empty
+    // range means no line ever falls inside [start, end).
+    let cursor_range = if !no_file_loaded && app.focus == Focus::Content {
+        crate::app::block_range_at(&app.content_lines, app.content_cursor)
+    } else {
+        (0, 0)
+    };
+
+    let line_highlights: Vec<LineHighlight> = visible_lines
+        .iter()
+        .enumerate()
+        .map(|(visible_idx, _line)| {
+            let absolute_idx = app.content_scroll + visible_idx;
+            if Some(absolute_idx) == current_match_line {
+                LineHighlight::Current
+            } else if absolute_idx >= cursor_range.0 && absolute_idx < cursor_range.1 {
+                LineHighlight::Cursor
+            } else if match_indices.contains(&absolute_idx) {
+                LineHighlight::Match
+            } else {
+                LineHighlight::None
+            }
+        })
+        .collect();
 
     ContentView {
         title,
@@ -590,6 +616,134 @@ mod tests {
         assert_eq!(vm.content.line_highlights[0], LineHighlight::Current);
         assert_eq!(vm.content.line_highlights[1], LineHighlight::None);
         assert_eq!(vm.content.line_highlights[2], LineHighlight::Match);
+    }
+
+    // --- Block cursor highlight tests ---
+
+    #[test]
+    fn content_view_cursor_highlights_whole_block_when_focused() {
+        let mut app = make_app();
+        app.focus = Focus::Content;
+        app.current_file = Some(PathBuf::from("/test/file.md"));
+        app.content_lines = vec![
+            make_line_indent("A", 0),
+            make_line_indent("A1", 1),
+            make_line_indent("A2", 1),
+            make_line_indent("B", 0),
+        ];
+        app.content_cursor = 0;
+
+        let vm = build_view_model(&mut app, 0, 10);
+
+        assert_eq!(vm.content.line_highlights[0], LineHighlight::Cursor);
+        assert_eq!(vm.content.line_highlights[1], LineHighlight::Cursor);
+        assert_eq!(vm.content.line_highlights[2], LineHighlight::Cursor);
+        assert_eq!(vm.content.line_highlights[3], LineHighlight::None);
+    }
+
+    #[test]
+    fn content_view_cursor_on_leaf_only_highlights_itself() {
+        let mut app = make_app();
+        app.focus = Focus::Content;
+        app.current_file = Some(PathBuf::from("/test/file.md"));
+        app.content_lines = vec![
+            make_line_indent("A", 0),
+            make_line_indent("A1", 1),
+            make_line_indent("A2", 1),
+        ];
+        app.content_cursor = 1;
+
+        let vm = build_view_model(&mut app, 0, 10);
+
+        assert_eq!(vm.content.line_highlights[0], LineHighlight::None);
+        assert_eq!(vm.content.line_highlights[1], LineHighlight::Cursor);
+        assert_eq!(vm.content.line_highlights[2], LineHighlight::None);
+    }
+
+    #[test]
+    fn content_view_no_cursor_highlight_when_browser_focused() {
+        // Cursor highlighting is gated on content being the focused pane, so
+        // it doesn't fight `content_scroll` jumps driven by other
+        // mechanisms (e.g. content search) while the content pane isn't
+        // even the active one.
+        let mut app = make_app();
+        app.focus = Focus::Browser;
+        app.current_file = Some(PathBuf::from("/test/file.md"));
+        app.content_lines = vec![make_line_indent("A", 0), make_line_indent("A1", 1)];
+        app.content_cursor = 0;
+
+        let vm = build_view_model(&mut app, 0, 10);
+
+        assert!(vm
+            .content
+            .line_highlights
+            .iter()
+            .all(|h| matches!(h, LineHighlight::None)));
+    }
+
+    #[test]
+    fn content_view_search_current_wins_over_cursor() {
+        // Priority: Current (the active search match) beats Cursor even
+        // when the matched line is itself inside the cursor's block.
+        let mut app = make_app();
+        app.focus = Focus::Content;
+        app.current_file = Some(PathBuf::from("/test/file.md"));
+        app.content_lines = vec![
+            make_line_indent("A", 0),
+            make_line_indent("target", 1),
+            make_line_indent("A2", 1),
+        ];
+        // Cursor sits on the match line itself (leaf block: line 1 has no
+        // deeper-indented children, so its block is just itself). This
+        // keeps content_scroll==content_cursor, avoiding the render-time
+        // cursor-follow clamp pulling the scroll away from the match — in
+        // real usage content_search_commit keeps the two in sync the same
+        // way.
+        app.content_cursor = 1;
+        app.content_scroll = 1; // the active search match is line 1
+        app.content_search_query = "target".to_string();
+
+        let vm = build_view_model(&mut app, 0, 10);
+
+        // visible_lines starts at content_scroll (1): index 0 -> line 1, index 1 -> line 2
+        assert_eq!(vm.content.line_highlights[0], LineHighlight::Current); // Current beats Cursor
+        assert_eq!(vm.content.line_highlights[1], LineHighlight::None); // outside the (leaf) block
+    }
+
+    #[test]
+    fn content_view_cursor_wins_over_other_search_match() {
+        // Priority: Cursor beats Match (a search hit that is NOT the
+        // current one) when both would apply to the same line.
+        let mut app = make_app();
+        app.focus = Focus::Content;
+        app.current_file = Some(PathBuf::from("/test/file.md"));
+        app.content_lines = vec![
+            make_line_indent("A", 0),
+            make_line_indent("target child", 1),
+            make_line_indent("other", 0),
+            make_line_indent("target C", 0),
+        ];
+        app.content_cursor = 0; // block = lines 0..2
+        app.content_scroll = 0; // line 0 isn't a match, so there is no "current" match line
+        app.content_search_query = "target".to_string();
+
+        let vm = build_view_model(&mut app, 0, 10);
+
+        assert_eq!(vm.content.current_match, None);
+        // Line 1 matches the search query AND is inside the cursor block:
+        // Cursor wins over the plain Match highlight.
+        assert_eq!(vm.content.line_highlights[1], LineHighlight::Cursor);
+        // Line 3 matches too but is outside the block: plain Match still applies.
+        assert_eq!(vm.content.line_highlights[3], LineHighlight::Match);
+    }
+
+    fn make_line_indent(text: &str, indent: usize) -> ParsedLine {
+        ParsedLine {
+            indent,
+            is_bullet: true,
+            task: None,
+            segments: vec![Segment::Plain(text.to_string())],
+        }
     }
 
     fn make_line(text: &str) -> ParsedLine {

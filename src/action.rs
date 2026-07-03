@@ -58,6 +58,9 @@ pub enum Action {
 /// - Content: Tab/h->ToggleFocus, Down/j->ContentDown(1), Up/k->ContentUp(1),
 ///   PageDown->ContentDown(20), PageUp->ContentUp(20),
 ///   G->ContentBottom, gg->ContentTop
+///   (ContentUp/ContentDown/ContentTop/ContentBottom move the block cursor;
+///   see `App::content_down` et al. — the viewport scroll follows the
+///   cursor at render time.)
 /// - Search input mode (`search_input_active`): printable chars->SearchInput,
 ///   Backspace->SearchBackspace, Enter->SearchCommit, Esc->SearchCancel (both focuses)
 /// - Browser `/`->SearchStart; n/N with `browser_has_committed_search`->SearchNext/SearchPrev

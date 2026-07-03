@@ -273,6 +273,13 @@ fn draw_content(f: &mut Frame, vm: &ViewModel, area: Rect) {
                         .map(|span| span.bg(Color::DarkGray))
                         .collect::<Vec<_>>(),
                 ),
+                LineHighlight::Cursor => Line::from(
+                    base_line
+                        .spans
+                        .into_iter()
+                        .map(|span| span.bg(Color::Blue))
+                        .collect::<Vec<_>>(),
+                ),
                 LineHighlight::None => base_line,
             }
         })
