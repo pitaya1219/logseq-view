@@ -49,6 +49,15 @@ Recorded so future changes (and agents) keep the same shape instead of re-derivi
 The dependency direction itself (shell → core) is enforced by `clippy.toml`'s `disallowed_*` lints in
 CI, not by documentation. This file is guidance; the lint is the guard.
 
+### Effect Boundary Rule
+
+`update()` returns an `Update { quit, effects }`, where `effects: Vec<Effect>` is the TEA "Cmd"
+equivalent — data describing side effects, interpreted by `main.rs`'s event loop rather than executed
+inline in `app.rs`. Where a given side effect belongs:
+
+- Synchronous read effects that return a value -> stay on the `GraphSource` port (file read / children)
+- Effects involving terminal/process control -> `update()` returns an Effect and `main.rs` executes it
+
 ## Release Process
 
 Releases are automated via `.gitea/workflows/publish.yml` on `v*` tag push.

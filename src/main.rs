@@ -9,7 +9,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use logseq_view::action::map_key;
-use logseq_view::app::{App, Focus};
+use logseq_view::app::{App, Effect, Focus};
 use logseq_view::source::WalkdirGraphSource;
 use ratatui::{backend::CrosstermBackend, Terminal};
 
@@ -95,8 +95,13 @@ fn event_loop(
             pending_g = next_pending_g;
 
             if let Some(action) = action {
-                let should_quit = app.update(action)?;
-                if should_quit {
+                let update = app.update(action)?;
+
+                for effect in update.effects {
+                    apply_effect(effect);
+                }
+
+                if update.quit {
                     break;
                 }
             }
@@ -104,4 +109,20 @@ fn event_loop(
     }
 
     Ok(())
+}
+
+/// Interprets a single `Effect` produced by `App::update()`. There are no
+/// variants yet, so this is a no-op hook; future effects (e.g.
+/// `Effect::LaunchEditor`, see #46) that need terminal/process control are
+/// handled here rather than in `app.rs`, keeping the core free of
+/// process/terminal concerns.
+// `Effect` has no variants yet, so this match only has a wildcard arm;
+// `#[non_exhaustive]` still requires it, and clippy would otherwise flag the
+// match as reducible to its body. Kept as a match (not a plain no-op) so #46
+// can add `Effect::LaunchEditor { .. }` as a real arm here.
+#[allow(clippy::match_single_binding)]
+fn apply_effect(effect: Effect) {
+    match effect {
+        _ => {}
+    }
 }

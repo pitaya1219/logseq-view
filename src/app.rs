@@ -10,6 +10,27 @@ pub enum Focus {
     Content,
 }
 
+/// A side effect requested by `update()` for `main.rs` to execute.
+///
+/// This is the TEA "Cmd" equivalent: `update()` stays pure state transition +
+/// data, and anything that touches the terminal or spawns a process is
+/// described here and interpreted by the shell's event loop. There are no
+/// variants yet (this is plumbing landed ahead of the first real effect,
+/// e.g. `LaunchEditor { path }`), but the type is forward-compatible via
+/// `#[non_exhaustive]` so adding one is not a breaking change for callers
+/// that already match exhaustively elsewhere.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Effect {}
+
+/// The result of a single `update()` call: whether the app should quit, plus
+/// any effects for `main.rs` to execute.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Update {
+    pub quit: bool,
+    pub effects: Vec<Effect>,
+}
+
 #[derive(Debug, Clone)]
 pub struct FileItem {
     pub path: PathBuf,
@@ -138,8 +159,18 @@ impl<S: GraphSource> App<S> {
     }
 
     /// Main update function that handles all actions.
-    /// Returns Ok(true) if the application should quit, Ok(false) otherwise.
-    pub fn update(&mut self, action: Action) -> Result<bool> {
+    /// Returns an `Update` describing whether the app should quit and any
+    /// effects for `main.rs` to execute.
+    pub fn update(&mut self, action: Action) -> Result<Update> {
+        let quit = self.update_quit(action)?;
+        Ok(Update {
+            quit,
+            effects: Vec::new(),
+        })
+    }
+
+    /// Applies the action to the model, returning whether the app should quit.
+    fn update_quit(&mut self, action: Action) -> Result<bool> {
         match action {
             Action::Quit => Ok(true),
             Action::ToggleFocus => {
@@ -915,7 +946,7 @@ mod tests {
     #[test]
     fn update_quit_returns_true() {
         let mut app = make_app();
-        let should_quit = app.update(Action::Quit).unwrap();
+        let should_quit = app.update(Action::Quit).unwrap().quit;
         assert!(should_quit);
     }
 
@@ -923,7 +954,7 @@ mod tests {
     fn update_toggle_focus_switches_from_browser_to_content() {
         let mut app = make_app();
         app.focus = Focus::Browser;
-        let should_quit = app.update(Action::ToggleFocus).unwrap();
+        let should_quit = app.update(Action::ToggleFocus).unwrap().quit;
         assert!(!should_quit);
         assert_eq!(app.focus, Focus::Content);
     }
@@ -932,7 +963,7 @@ mod tests {
     fn update_toggle_focus_switches_from_content_to_browser() {
         let mut app = make_app();
         app.focus = Focus::Content;
-        let should_quit = app.update(Action::ToggleFocus).unwrap();
+        let should_quit = app.update(Action::ToggleFocus).unwrap().quit;
         assert!(!should_quit);
         assert_eq!(app.focus, Focus::Browser);
     }
@@ -958,7 +989,7 @@ mod tests {
         ];
         app.browser_selected = 0;
 
-        let should_quit = app.update(Action::BrowserDown).unwrap();
+        let should_quit = app.update(Action::BrowserDown).unwrap().quit;
         assert!(!should_quit);
         assert_eq!(app.browser_selected, 1);
     }
@@ -984,7 +1015,7 @@ mod tests {
         ];
         app.browser_selected = 1;
 
-        let should_quit = app.update(Action::BrowserUp).unwrap();
+        let should_quit = app.update(Action::BrowserUp).unwrap().quit;
         assert!(!should_quit);
         assert_eq!(app.browser_selected, 0);
     }
@@ -995,7 +1026,7 @@ mod tests {
         app.content_lines = dummy_lines(10);
         app.content_scroll = 0;
 
-        let should_quit = app.update(Action::ContentDown(1)).unwrap();
+        let should_quit = app.update(Action::ContentDown(1)).unwrap().quit;
         assert!(!should_quit);
         assert_eq!(app.content_scroll, 1);
     }
@@ -1006,7 +1037,7 @@ mod tests {
         app.content_lines = dummy_lines(10);
         app.content_scroll = 5;
 
-        let should_quit = app.update(Action::ContentUp(1)).unwrap();
+        let should_quit = app.update(Action::ContentUp(1)).unwrap().quit;
         assert!(!should_quit);
         assert_eq!(app.content_scroll, 4);
     }
@@ -1017,7 +1048,7 @@ mod tests {
         app.content_lines = dummy_lines(10);
         app.content_scroll = 5;
 
-        let should_quit = app.update(Action::ContentTop).unwrap();
+        let should_quit = app.update(Action::ContentTop).unwrap().quit;
         assert!(!should_quit);
         assert_eq!(app.content_scroll, 0);
     }
@@ -1028,7 +1059,7 @@ mod tests {
         app.content_lines = dummy_lines(10);
         app.content_scroll = 0;
 
-        let should_quit = app.update(Action::ContentBottom).unwrap();
+        let should_quit = app.update(Action::ContentBottom).unwrap().quit;
         assert!(!should_quit);
         assert_eq!(app.content_scroll, 9);
     }
@@ -1063,7 +1094,7 @@ mod tests {
         ];
         app.browser_selected = 2;
 
-        let should_quit = app.update(Action::BrowserTop).unwrap();
+        let should_quit = app.update(Action::BrowserTop).unwrap().quit;
         assert!(!should_quit);
         assert_eq!(app.browser_selected, 0);
     }
@@ -1096,7 +1127,7 @@ mod tests {
         ];
         app.browser_selected = 0;
 
-        let should_quit = app.update(Action::BrowserBottom).unwrap();
+        let should_quit = app.update(Action::BrowserBottom).unwrap().quit;
         assert!(!should_quit);
         assert_eq!(app.browser_selected, 2);
     }
@@ -1136,7 +1167,7 @@ mod tests {
         ];
         app.browser_selected = 2;
 
-        let should_quit = app.update(Action::BrowserTop).unwrap();
+        let should_quit = app.update(Action::BrowserTop).unwrap().quit;
         assert!(!should_quit);
         assert_eq!(app.browser_selected, 1);
     }
@@ -1176,7 +1207,7 @@ mod tests {
         ];
         app.browser_selected = 1;
 
-        let should_quit = app.update(Action::BrowserBottom).unwrap();
+        let should_quit = app.update(Action::BrowserBottom).unwrap().quit;
         assert!(!should_quit);
         assert_eq!(app.browser_selected, 2);
     }
@@ -1223,7 +1254,7 @@ mod tests {
         ];
         app.browser_selected = 3;
 
-        let should_quit = app.update(Action::BrowserTop).unwrap();
+        let should_quit = app.update(Action::BrowserTop).unwrap().quit;
         assert!(!should_quit);
         assert_eq!(app.browser_selected, 2);
     }
@@ -1270,7 +1301,7 @@ mod tests {
         ];
         app.browser_selected = 2;
 
-        let should_quit = app.update(Action::BrowserBottom).unwrap();
+        let should_quit = app.update(Action::BrowserBottom).unwrap().quit;
         assert!(!should_quit);
         assert_eq!(app.browser_selected, 4);
     }
@@ -1283,7 +1314,7 @@ mod tests {
         app.focus = Focus::Content;
         app.current_file = Some(PathBuf::from("/test/file.md"));
 
-        let should_quit = app.update(Action::SearchStart).unwrap();
+        let should_quit = app.update(Action::SearchStart).unwrap().quit;
         assert!(!should_quit);
         assert!(app.content_search_active);
         assert!(app.content_search_query.is_empty());
@@ -1393,7 +1424,7 @@ mod tests {
         app.update(Action::SearchInput('a')).unwrap();
         app.update(Action::SearchInput('r')).unwrap();
 
-        let should_quit = app.update(Action::SearchCommit).unwrap();
+        let should_quit = app.update(Action::SearchCommit).unwrap().quit;
         assert!(!should_quit);
         assert!(!app.content_search_active);
         assert_eq!(app.content_search_query, "tar");
@@ -1426,7 +1457,7 @@ mod tests {
         app.update(Action::SearchInput('z')).unwrap();
         app.update(Action::SearchInput('z')).unwrap();
 
-        let should_quit = app.update(Action::SearchCommit).unwrap();
+        let should_quit = app.update(Action::SearchCommit).unwrap().quit;
         assert!(!should_quit);
         assert!(app.content_search_active);
         assert_eq!(app.content_search_query, "zz");
@@ -1467,7 +1498,7 @@ mod tests {
 
         assert_eq!(app.content_scroll, 0);
 
-        let should_quit = app.update(Action::SearchNext).unwrap();
+        let should_quit = app.update(Action::SearchNext).unwrap().quit;
         assert!(!should_quit);
         assert_eq!(app.content_scroll, 2);
     }
@@ -1507,7 +1538,7 @@ mod tests {
 
         assert_eq!(app.content_scroll, 2);
 
-        let should_quit = app.update(Action::SearchPrev).unwrap();
+        let should_quit = app.update(Action::SearchPrev).unwrap().quit;
         assert!(!should_quit);
         assert_eq!(app.content_scroll, 0);
     }
@@ -1518,7 +1549,7 @@ mod tests {
         app.focus = Focus::Content;
         app.content_scroll = 0;
 
-        let should_quit = app.update(Action::SearchNext).unwrap();
+        let should_quit = app.update(Action::SearchNext).unwrap().quit;
         assert!(!should_quit);
         assert_eq!(app.content_scroll, 0);
     }
@@ -1529,7 +1560,7 @@ mod tests {
         app.focus = Focus::Content;
         app.content_scroll = 5;
 
-        let should_quit = app.update(Action::SearchPrev).unwrap();
+        let should_quit = app.update(Action::SearchPrev).unwrap().quit;
         assert!(!should_quit);
         assert_eq!(app.content_scroll, 5);
     }
@@ -1561,7 +1592,7 @@ mod tests {
         app.update(Action::SearchInput('a')).unwrap();
         app.update(Action::SearchInput('r')).unwrap();
 
-        let should_quit = app.update(Action::SearchCommit).unwrap();
+        let should_quit = app.update(Action::SearchCommit).unwrap().quit;
         assert!(!should_quit);
         assert_eq!(app.content_scroll, 0);
     }
@@ -1599,7 +1630,7 @@ mod tests {
         app.update(Action::SearchInput('g')).unwrap();
         app.update(Action::SearchInput('e')).unwrap();
 
-        let should_quit = app.update(Action::SearchCommit).unwrap();
+        let should_quit = app.update(Action::SearchCommit).unwrap().quit;
         assert!(!should_quit);
         assert_eq!(app.content_scroll, 0);
     }
