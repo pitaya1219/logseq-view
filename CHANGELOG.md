@@ -1,4 +1,26 @@
 # Changelog
+## [0.3.0] - 2026-07-06
+
+### Bug Fixes
+
+- Skip CI for release-only commits
+
+### Features
+
+- Edit current page with $EDITOR via LaunchEditor effect
+- Block-level cursor and highlight in content pane
+- Block-level editing with page/block granularity
+- Show block cursor as a left-gutter bar
+- Show edit keybindings in the content status bar
+
+### Miscellaneous Tasks
+
+- Mirror releases to GitHub for public visibility
+
+### Refactor
+
+- Update() returns Effect plumbing (Cmd equivalent)
+
 ## [0.2.0] - 2026-07-03
 
 ### Bug Fixes
