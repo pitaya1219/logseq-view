@@ -250,38 +250,44 @@ fn draw_content(f: &mut Frame, vm: &ViewModel, area: Rect) {
         return;
     }
 
-    // Build styled lines with search highlighting
+    // Build styled lines: a left-column gutter bar marks the current block,
+    // and the text carries the (search-only) highlight. The two are separate
+    // channels, so a line can show both at once.
     let lines: Vec<Line> = vm
         .content
         .visible_lines
         .iter()
         .zip(vm.content.line_highlights.iter())
-        .map(|(line, highlight)| {
+        .zip(vm.content.cursor_block.iter())
+        .map(|((line, highlight), in_cursor_block)| {
             let base_line = render_line(line);
-            match highlight {
-                LineHighlight::Current => Line::from(
-                    base_line
-                        .spans
-                        .into_iter()
-                        .map(|span| span.bg(Color::Yellow).fg(Color::Black))
-                        .collect::<Vec<_>>(),
-                ),
-                LineHighlight::Match => Line::from(
-                    base_line
-                        .spans
-                        .into_iter()
-                        .map(|span| span.bg(Color::DarkGray))
-                        .collect::<Vec<_>>(),
-                ),
-                LineHighlight::Cursor => Line::from(
-                    base_line
-                        .spans
-                        .into_iter()
-                        .map(|span| span.bg(Color::Blue))
-                        .collect::<Vec<_>>(),
-                ),
-                LineHighlight::None => base_line,
-            }
+            let mut text_spans: Vec<Span> = match highlight {
+                LineHighlight::Current => base_line
+                    .spans
+                    .into_iter()
+                    .map(|span| span.bg(Color::Yellow).fg(Color::Black))
+                    .collect(),
+                LineHighlight::Match => base_line
+                    .spans
+                    .into_iter()
+                    .map(|span| span.bg(Color::DarkGray))
+                    .collect(),
+                LineHighlight::None => base_line.spans,
+            };
+
+            // Every line gets a one-column gutter so the text stays aligned;
+            // only cursor-block lines show the bar (in the otherwise empty
+            // leading column — no character or bullet there).
+            let gutter = if *in_cursor_block {
+                Span::styled("▎", Style::default().fg(Color::Cyan))
+            } else {
+                Span::raw(" ")
+            };
+
+            let mut spans = Vec::with_capacity(text_spans.len() + 1);
+            spans.push(gutter);
+            spans.append(&mut text_spans);
+            Line::from(spans)
         })
         .collect();
 

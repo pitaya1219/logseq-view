@@ -19,20 +19,20 @@ pub struct ScrollbarInfo {
     pub position: usize,
 }
 
-/// Highlight state for a visible line: search results and/or the block
-/// cursor.
+/// Highlight state for a visible line's TEXT. Driven by search only.
 ///
 /// Priority when more than one would apply to the same line (highest
-/// first): `Current` (the active search match) > `Cursor` (the block the
-/// content cursor is on) > `Match` (other search matches) > `None`. Search's
-/// "you are here" wins over the cursor block since it answers a more
-/// specific question ("where's my match"), but the cursor block still shows
-/// through on any of its lines that are merely one of several matches.
+/// first): `Current` (the active search match) > `Match` (other search
+/// matches) > `None`.
+///
+/// The block cursor is a *separate* visual channel — a left-column gutter
+/// bar (see `ContentView::cursor_block`), not a text background — so it no
+/// longer competes with search highlighting. A line can be both a search
+/// match and inside the cursor block; the two are rendered independently.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LineHighlight {
     None,
     Match,
-    Cursor,
     Current,
 }
 
@@ -47,6 +47,10 @@ pub struct ContentView {
     pub match_count: usize,
     pub current_match: Option<usize>,
     pub line_highlights: Vec<LineHighlight>,
+    /// Per visible line: `true` if the line belongs to the current cursor
+    /// block. Rendered as a left-column gutter bar, independent of
+    /// `line_highlights`.
+    pub cursor_block: Vec<bool>,
 }
 
 /// ViewModel for the browser area
@@ -192,6 +196,9 @@ fn build_content_view<S: GraphSource>(app: &mut App<S>, visible_height: usize) -
         (0, 0)
     };
 
+    // Text highlight is search-only. The block cursor is a separate channel
+    // (`cursor_block`), so a line can be both a search match and inside the
+    // cursor block without either hiding the other.
     let line_highlights: Vec<LineHighlight> = visible_lines
         .iter()
         .enumerate()
@@ -199,13 +206,22 @@ fn build_content_view<S: GraphSource>(app: &mut App<S>, visible_height: usize) -
             let absolute_idx = app.content_scroll + visible_idx;
             if Some(absolute_idx) == current_match_line {
                 LineHighlight::Current
-            } else if absolute_idx >= cursor_range.0 && absolute_idx < cursor_range.1 {
-                LineHighlight::Cursor
             } else if match_indices.contains(&absolute_idx) {
                 LineHighlight::Match
             } else {
                 LineHighlight::None
             }
+        })
+        .collect();
+
+    // Per-line membership in the current cursor block, rendered as a
+    // left-column gutter bar in the view (not a text background).
+    let cursor_block: Vec<bool> = visible_lines
+        .iter()
+        .enumerate()
+        .map(|(visible_idx, _line)| {
+            let absolute_idx = app.content_scroll + visible_idx;
+            absolute_idx >= cursor_range.0 && absolute_idx < cursor_range.1
         })
         .collect();
 
@@ -218,6 +234,7 @@ fn build_content_view<S: GraphSource>(app: &mut App<S>, visible_height: usize) -
         match_count,
         current_match,
         line_highlights,
+        cursor_block,
     }
 }
 
@@ -636,10 +653,14 @@ mod tests {
 
         let vm = build_view_model(&mut app, 0, 10);
 
-        assert_eq!(vm.content.line_highlights[0], LineHighlight::Cursor);
-        assert_eq!(vm.content.line_highlights[1], LineHighlight::Cursor);
-        assert_eq!(vm.content.line_highlights[2], LineHighlight::Cursor);
-        assert_eq!(vm.content.line_highlights[3], LineHighlight::None);
+        // The whole block (lines 0..3) is marked in the gutter channel; no
+        // text highlight (no search active).
+        assert_eq!(vm.content.cursor_block, vec![true, true, true, false]);
+        assert!(vm
+            .content
+            .line_highlights
+            .iter()
+            .all(|h| matches!(h, LineHighlight::None)));
     }
 
     #[test]
@@ -656,9 +677,7 @@ mod tests {
 
         let vm = build_view_model(&mut app, 0, 10);
 
-        assert_eq!(vm.content.line_highlights[0], LineHighlight::None);
-        assert_eq!(vm.content.line_highlights[1], LineHighlight::Cursor);
-        assert_eq!(vm.content.line_highlights[2], LineHighlight::None);
+        assert_eq!(vm.content.cursor_block, vec![false, true, false]);
     }
 
     #[test]
@@ -675,17 +694,16 @@ mod tests {
 
         let vm = build_view_model(&mut app, 0, 10);
 
-        assert!(vm
-            .content
-            .line_highlights
-            .iter()
-            .all(|h| matches!(h, LineHighlight::None)));
+        // Gutter is gated on content being focused: no bar while the browser
+        // pane is active.
+        assert!(vm.content.cursor_block.iter().all(|&b| !b));
     }
 
     #[test]
-    fn content_view_search_current_wins_over_cursor() {
-        // Priority: Current (the active search match) beats Cursor even
-        // when the matched line is itself inside the cursor's block.
+    fn content_view_cursor_gutter_and_search_current_coexist() {
+        // The cursor gutter bar and the active search-match text highlight
+        // are independent channels: a line can be both the current match and
+        // inside the cursor block, showing both.
         let mut app = make_app();
         app.focus = Focus::Content;
         app.current_file = Some(PathBuf::from("/test/file.md"));
@@ -707,14 +725,18 @@ mod tests {
         let vm = build_view_model(&mut app, 0, 10);
 
         // visible_lines starts at content_scroll (1): index 0 -> line 1, index 1 -> line 2
-        assert_eq!(vm.content.line_highlights[0], LineHighlight::Current); // Current beats Cursor
+        // Line 1 is the active match (Current text highlight) AND the cursor
+        // block (leaf) — both channels light up on the same line.
+        assert_eq!(vm.content.line_highlights[0], LineHighlight::Current);
+        assert!(vm.content.cursor_block[0]);
         assert_eq!(vm.content.line_highlights[1], LineHighlight::None); // outside the (leaf) block
+        assert!(!vm.content.cursor_block[1]);
     }
 
     #[test]
-    fn content_view_cursor_wins_over_other_search_match() {
-        // Priority: Cursor beats Match (a search hit that is NOT the
-        // current one) when both would apply to the same line.
+    fn content_view_cursor_gutter_and_search_match_coexist() {
+        // A plain search match inside the cursor block keeps its Match text
+        // highlight AND gets the gutter bar — the two no longer compete.
         let mut app = make_app();
         app.focus = Focus::Content;
         app.current_file = Some(PathBuf::from("/test/file.md"));
@@ -732,10 +754,12 @@ mod tests {
 
         assert_eq!(vm.content.current_match, None);
         // Line 1 matches the search query AND is inside the cursor block:
-        // Cursor wins over the plain Match highlight.
-        assert_eq!(vm.content.line_highlights[1], LineHighlight::Cursor);
-        // Line 3 matches too but is outside the block: plain Match still applies.
+        // Match text highlight stays, and the gutter bar shows too.
+        assert_eq!(vm.content.line_highlights[1], LineHighlight::Match);
+        assert!(vm.content.cursor_block[1]);
+        // Line 3 matches too but is outside the block: Match, no gutter bar.
         assert_eq!(vm.content.line_highlights[3], LineHighlight::Match);
+        assert!(!vm.content.cursor_block[3]);
     }
 
     fn make_line_indent(text: &str, indent: usize) -> ParsedLine {
