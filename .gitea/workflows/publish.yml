@@ -141,3 +141,29 @@ jobs:
               --arg name "${TAG}" \
               --arg body "${BODY}" \
               '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false}')"
+
+      # Public-facing surfaces: Gitea (self-hosted) is unreliable to reach from
+      # outside, so mirror the release to GitHub too. Push the release commit and
+      # tag directly (independent of the Gitea push-mirror's sync timing) so the
+      # GitHub release below always has its tag present.
+      - name: Push release commit and tag to GitHub
+        env:
+          GH_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
+        run: |
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            HEAD:main "HEAD:refs/tags/${TAG}"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
+        run: |
+          BODY=$(cat "${RUNNER_TEMP}/RELEASE_NOTES.md")
+          curl -sSf -X POST "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -d "$(jq -n \
+              --arg tag "${TAG}" \
+              --arg name "${TAG}" \
+              --arg body "${BODY}" \
+              '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false}')"
