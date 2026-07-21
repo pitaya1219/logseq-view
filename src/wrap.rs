@@ -17,6 +17,15 @@ use unicode_width::UnicodeWidthChar;
 /// characters count as two columns, matching how a terminal actually renders
 /// them), returning the byte range of each wrapped row.
 ///
+/// A literal `\n` is always a hard row break, regardless of how much of
+/// `width` the current row has used -- it never appears inside a returned
+/// range. This matters because a folded fenced code block
+/// (`parser::parse_file`) carries its embedded newlines straight into
+/// `line_display_text`: without this, `\n` (zero display width) never
+/// triggered the overflow branch on its own, so it never started a new row.
+/// The code block's original line boundaries were lost, and what were
+/// separate source lines rendered concatenated onto the same wrapped row.
+///
 /// Always returns at least one row, even for empty text or `width == 0`, so
 /// callers relying on "one line maps to >=1 row" (the scroll/clamp math) never
 /// see a line silently disappear.
@@ -49,6 +58,20 @@ pub fn wrap_row_ranges(text: &str, width: usize) -> Vec<Range<usize>> {
     let mut i = 0;
     while i < n {
         let (_, ch) = chars[i];
+
+        if ch == '\n' {
+            // Hard break, independent of `width`/`col` -- see the doc
+            // comment above for why this can't be left to the ordinary
+            // whitespace-break logic below (zero display width means it
+            // would never trigger the overflow branch on its own).
+            rows.push(byte_at(row_start)..byte_at(i));
+            row_start = i + 1;
+            col = 0;
+            last_ws = None;
+            i += 1;
+            continue;
+        }
+
         let ch_width = ch.width().unwrap_or(0);
 
         if col + ch_width > width {
@@ -163,6 +186,36 @@ mod tests {
     #[test]
     fn row_count_matches_number_of_ranges() {
         assert_eq!(row_count("x".repeat(200).as_str(), 19), 11);
+    }
+
+    #[test]
+    fn embedded_newline_is_a_hard_break_regardless_of_width() {
+        // A fenced code block's folded text (parser::parse_file) embeds real
+        // `\n` bytes -- these must always start a new row, even when the
+        // row so far is nowhere near `width`, so a literal '\n' never ends
+        // up inside a row's byte range (see the doc comment on
+        // `wrap_row_ranges` for why that matters beyond just readability).
+        assert_eq!(rows("ab\ncd", 80), vec!["ab", "cd"]);
+    }
+
+    #[test]
+    fn consecutive_newlines_produce_an_empty_row() {
+        assert_eq!(rows("a\n\nb", 80), vec!["a", "", "b"]);
+    }
+
+    #[test]
+    fn newline_combines_with_width_wrapping() {
+        // A long line inside a code block still word-wraps normally after
+        // the hard break from the previous line.
+        assert_eq!(
+            rows("hello world\nfoo bar baz", 5),
+            vec!["hello", "world", "foo", "bar", "baz"]
+        );
+    }
+
+    #[test]
+    fn trailing_newline_does_not_add_a_phantom_row() {
+        assert_eq!(rows("ab\n", 80), vec!["ab"]);
     }
 
     #[test]

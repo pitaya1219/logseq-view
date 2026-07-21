@@ -719,6 +719,57 @@ mod tests {
     }
 
     #[test]
+    fn fenced_code_block_lines_render_on_separate_rows() {
+        // Regression guard: `parser::parse_file` folds a whole fenced code
+        // block into one `ParsedLine` whose `Segment::Code` text embeds real
+        // '\n' bytes (fence + code + fence, joined with "\n"). Before
+        // `wrap::wrap_row_ranges` treated '\n' as a hard break, it had zero
+        // display width, so it never triggered a row break on its own -- a
+        // code block narrow enough to fit `wrap_width` rendered as ONE row
+        // with every original source line run together, instead of one row
+        // per line like the rest of the file's content.
+        let mut app = App::new(PathBuf::new(), FakeGraphSource::new()).unwrap();
+        app.file_items.clear();
+        app.current_file = Some(PathBuf::from("test.md"));
+        app.content_lines = vec![crate::parser::ParsedLine {
+            indent: 0,
+            is_bullet: false,
+            task: None,
+            segments: vec![crate::parser::Segment::Code(
+                "```rust\nfn main() {\n    println!(\"hi\");\n}\n```".to_string(),
+            )],
+            ..Default::default()
+        }];
+        app.focus = Focus::Content;
+
+        let width = 60;
+        let backend = TestBackend::new(width, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+        let buffer = terminal.backend().buffer().clone();
+        let row_text = |y: u16| -> String { (0..width).map(|x| buffer[(x, y)].symbol()).collect() };
+        let rows: Vec<String> = (0..buffer.area.height).map(row_text).collect();
+
+        let fn_main_row = rows.iter().position(|r| r.contains("fn main"));
+        let println_row = rows.iter().position(|r| r.contains("println"));
+
+        assert!(
+            fn_main_row.is_some() && println_row.is_some(),
+            "expected both code lines to render somewhere.\nBuffer:\n{}",
+            rows.join("\n")
+        );
+        assert_ne!(
+            fn_main_row,
+            println_row,
+            "the code block's separate source lines were merged onto the \
+             same rendered row -- the embedded '\\n' failed to force a row \
+             break.\nBuffer:\n{}",
+            rows.join("\n")
+        );
+    }
+
+    #[test]
     fn cursor_gutter_bar_repeats_on_every_wrapped_row() {
         // The cursor-block gutter bar is a per-row visual, not per-line: a
         // wrapped line inside the cursor block should show the bar on every
