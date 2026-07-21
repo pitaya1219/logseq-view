@@ -1,5 +1,5 @@
 use crate::app::{App, Focus};
-use crate::parser::ParsedLine;
+use crate::parser::{line_row_count, ParsedLine};
 use crate::source::{url_decode, GraphSource};
 
 /// A single visible browser row for rendering
@@ -51,6 +51,14 @@ pub struct ContentView {
     /// block. Rendered as a left-column gutter bar, independent of
     /// `line_highlights`.
     pub cursor_block: Vec<bool>,
+    /// The column width `visible_lines` was windowed/clamped against (see
+    /// `parser::line_row_count`). `ui::draw_content` MUST wrap at this exact
+    /// width when rendering -- using any other value would let the number of
+    /// rows actually drawn drift from what this ViewModel assumed, which is
+    /// exactly the class of bug #71 papered over by truncating instead of
+    /// wrapping: the scroll/cursor/scrollbar math and the renderer silently
+    /// disagreeing about how many rows a line takes.
+    pub wrap_width: usize,
 }
 
 /// ViewModel for the browser area
@@ -75,13 +83,18 @@ pub struct ViewModel {
 }
 
 /// Build a ViewModel from the App state and visible heights.
+///
+/// `content_visible_width` is the column width available to content text
+/// (i.e. already excluding borders and the cursor-block gutter column) --
+/// see `ContentView::wrap_width`.
 pub fn build_view_model<S: GraphSource>(
     app: &mut App<S>,
     browser_visible_height: usize,
     content_visible_height: usize,
+    content_visible_width: usize,
 ) -> ViewModel {
     let browser_view = build_browser_view(app, browser_visible_height);
-    let content_view = build_content_view(app, content_visible_height);
+    let content_view = build_content_view(app, content_visible_height, content_visible_width);
 
     ViewModel {
         browser: browser_view,
@@ -121,7 +134,21 @@ fn build_browser_view<S: GraphSource>(app: &mut App<S>, visible_height: usize) -
     }
 }
 
-fn build_content_view<S: GraphSource>(app: &mut App<S>, visible_height: usize) -> ContentView {
+fn build_content_view<S: GraphSource>(
+    app: &mut App<S>,
+    visible_height: usize,
+    visible_width: usize,
+) -> ContentView {
+    // Measured once per frame and shared by the clamps below, the windowing,
+    // and the scrollbar -- each `ParsedLine`'s text would otherwise get
+    // re-measured (a fresh `line_display_text` allocation + wrap pass) by
+    // every one of those independently.
+    let row_counts: Vec<usize> = app
+        .content_lines
+        .iter()
+        .map(|l| line_row_count(l, visible_width))
+        .collect();
+
     // The block cursor only drives auto-scroll while content is the focused
     // pane. This matters beyond cosmetics: `content_scroll` is also driven
     // independently by content search (jumping to a match line), and
@@ -131,9 +158,9 @@ fn build_content_view<S: GraphSource>(app: &mut App<S>, visible_height: usize) -
     // `content_search_commit` etc.), so gating on focus here is enough to
     // keep the two mechanisms from stepping on each other.
     if app.focus == Focus::Content {
-        app.clamp_content_cursor_scroll(visible_height);
+        app.clamp_content_cursor_scroll(visible_height, &row_counts);
     }
-    app.clamp_content_scroll(visible_height);
+    app.clamp_content_scroll(visible_height, &row_counts);
 
     let title = app
         .current_file
@@ -144,25 +171,39 @@ fn build_content_view<S: GraphSource>(app: &mut App<S>, visible_height: usize) -
 
     let no_file_loaded = app.current_file.is_none();
 
+    // Window the visible lines by ROWS, not by line count: a wrapped line
+    // can occupy more than one row (see `line_row_count`), so the window
+    // includes lines starting at `content_scroll` until the row budget is
+    // spent -- including the line that crosses the budget (its later rows
+    // simply won't be drawn; ratatui clips to the pane's height regardless),
+    // but no line after that, since it wouldn't render at all.
     let visible_lines: Vec<ParsedLine> = if no_file_loaded {
         Vec::new()
     } else {
-        app.content_lines
+        let mut rows_used = 0usize;
+        app.content_lines[app.content_scroll..]
             .iter()
-            .skip(app.content_scroll)
-            .take(visible_height)
-            .cloned()
+            .zip(row_counts[app.content_scroll..].iter())
+            .take_while(|(_, &row_count)| {
+                if rows_used >= visible_height {
+                    return false;
+                }
+                rows_used += row_count;
+                true
+            })
+            .map(|(line, _)| line.clone())
             .collect()
     };
 
     let scrollbar = if no_file_loaded {
         None
     } else {
-        let total = app.content_lines.len();
-        if total > visible_height {
+        let total_rows: usize = row_counts.iter().sum();
+        if total_rows > visible_height {
+            let rows_before_scroll: usize = row_counts[..app.content_scroll].iter().sum();
             Some(ScrollbarInfo {
-                total: total.saturating_sub(visible_height),
-                position: app.content_scroll,
+                total: total_rows.saturating_sub(visible_height),
+                position: rows_before_scroll,
             })
         } else {
             None
@@ -235,6 +276,7 @@ fn build_content_view<S: GraphSource>(app: &mut App<S>, visible_height: usize) -
         current_match,
         line_highlights,
         cursor_block,
+        wrap_width: visible_width,
     }
 }
 
@@ -292,7 +334,7 @@ mod tests {
         app.browser_offset = 5;
         app.browser_selected = 3;
 
-        let vm = build_view_model(&mut app, 10, 0);
+        let vm = build_view_model(&mut app, 10, 0, 80);
 
         assert_eq!(app.browser_offset, 3);
         assert_eq!(vm.browser.visible_rows.len(), 10);
@@ -306,7 +348,7 @@ mod tests {
         app.browser_offset = 0;
         app.browser_selected = 10;
 
-        let vm = build_view_model(&mut app, 5, 0);
+        let vm = build_view_model(&mut app, 5, 0, 80);
 
         assert_eq!(app.browser_offset, 6);
         assert_eq!(vm.browser.visible_rows.len(), 5);
@@ -320,7 +362,7 @@ mod tests {
         app.browser_offset = 2;
         app.browser_selected = 4;
 
-        let vm = build_view_model(&mut app, 10, 0);
+        let vm = build_view_model(&mut app, 10, 0, 80);
 
         assert_eq!(app.browser_offset, 2);
         assert_eq!(vm.browser.visible_rows.len(), 10);
@@ -351,7 +393,7 @@ mod tests {
         app.browser_offset = 0;
         app.browser_selected = 1;
 
-        let vm = build_view_model(&mut app, 10, 0);
+        let vm = build_view_model(&mut app, 10, 0, 80);
 
         assert_eq!(vm.browser.visible_rows.len(), 2);
         assert_eq!(vm.browser.visible_rows[0].name, "file_a");
@@ -372,12 +414,12 @@ mod tests {
         let mut app = make_app();
         app.focus = Focus::Browser;
 
-        let vm = build_view_model(&mut app, 10, 0);
+        let vm = build_view_model(&mut app, 10, 0, 80);
         assert!(vm.browser.focused);
         assert!(!vm.content.focused);
 
         app.focus = Focus::Content;
-        let vm = build_view_model(&mut app, 10, 0);
+        let vm = build_view_model(&mut app, 10, 0, 80);
         assert!(!vm.browser.focused);
         assert!(vm.content.focused);
     }
@@ -391,7 +433,7 @@ mod tests {
         app.content_scroll = 15;
         app.current_file = Some(PathBuf::from("/test/file.md"));
 
-        let vm = build_view_model(&mut app, 0, 10);
+        let vm = build_view_model(&mut app, 0, 10, 80);
 
         assert_eq!(app.content_scroll, 10);
         assert_eq!(vm.content.visible_lines.len(), 10);
@@ -404,7 +446,7 @@ mod tests {
         app.content_scroll = 0;
         app.current_file = Some(PathBuf::from("/test/file.md"));
 
-        let vm = build_view_model(&mut app, 0, 10);
+        let vm = build_view_model(&mut app, 0, 10, 80);
 
         assert_eq!(app.content_scroll, 0);
         assert_eq!(vm.content.visible_lines.len(), 5);
@@ -417,7 +459,7 @@ mod tests {
         app.content_scroll = 10;
         app.current_file = Some(PathBuf::from("/test/file.md"));
 
-        let vm = build_view_model(&mut app, 0, 10);
+        let vm = build_view_model(&mut app, 0, 10, 80);
 
         assert_eq!(app.content_scroll, 10);
         assert_eq!(vm.content.visible_lines.len(), 10);
@@ -430,7 +472,7 @@ mod tests {
         app.content_scroll = 5;
         app.current_file = Some(PathBuf::from("/test/file.md"));
 
-        let vm = build_view_model(&mut app, 0, 10);
+        let vm = build_view_model(&mut app, 0, 10, 80);
 
         assert!(vm.content.scrollbar.is_some());
         let scrollbar = vm.content.scrollbar.unwrap();
@@ -445,7 +487,7 @@ mod tests {
         app.content_scroll = 0;
         app.current_file = Some(PathBuf::from("/test/file.md"));
 
-        let vm = build_view_model(&mut app, 0, 10);
+        let vm = build_view_model(&mut app, 0, 10, 80);
 
         assert!(vm.content.scrollbar.is_none());
     }
@@ -456,7 +498,7 @@ mod tests {
         app.current_file = None;
         app.content_lines = Vec::new();
 
-        let vm = build_view_model(&mut app, 0, 10);
+        let vm = build_view_model(&mut app, 0, 10, 80);
 
         assert!(vm.content.no_file_loaded);
         assert_eq!(vm.content.title, " (no file) ");
@@ -469,7 +511,7 @@ mod tests {
         app.current_file = Some(PathBuf::from("/path/to/file.md"));
         app.content_lines = Vec::new();
 
-        let vm = build_view_model(&mut app, 0, 10);
+        let vm = build_view_model(&mut app, 0, 10, 80);
 
         assert!(!vm.content.no_file_loaded);
         assert_eq!(vm.content.title, " file ");
@@ -481,7 +523,7 @@ mod tests {
         app.current_file = Some(PathBuf::from("/path/to/encoded name.md"));
         app.content_lines = Vec::new();
 
-        let vm = build_view_model(&mut app, 0, 10);
+        let vm = build_view_model(&mut app, 0, 10, 80);
 
         assert_eq!(vm.content.title, " encoded name ");
     }
@@ -491,11 +533,11 @@ mod tests {
         let mut app = make_app();
         app.focus = Focus::Browser;
 
-        let vm = build_view_model(&mut app, 10, 10);
+        let vm = build_view_model(&mut app, 10, 10, 80);
         assert_eq!(vm.focus, Focus::Browser);
 
         app.focus = Focus::Content;
-        let vm = build_view_model(&mut app, 10, 10);
+        let vm = build_view_model(&mut app, 10, 10, 80);
         assert_eq!(vm.focus, Focus::Content);
     }
 
@@ -509,7 +551,7 @@ mod tests {
         app.content_scroll = 0;
         app.content_search_query = String::new();
 
-        let vm = build_view_model(&mut app, 0, 10);
+        let vm = build_view_model(&mut app, 0, 10, 80);
 
         assert_eq!(vm.content.match_count, 0);
         assert_eq!(vm.content.current_match, None);
@@ -535,7 +577,7 @@ mod tests {
         app.content_scroll = 0;
         app.content_search_query = "target".to_string();
 
-        let vm = build_view_model(&mut app, 0, 10);
+        let vm = build_view_model(&mut app, 0, 10, 80);
 
         assert_eq!(vm.content.match_count, 3);
         assert_eq!(vm.content.current_match, Some(1));
@@ -560,7 +602,7 @@ mod tests {
         app.content_scroll = 1;
         app.content_search_query = "target".to_string();
 
-        let vm = build_view_model(&mut app, 0, 10);
+        let vm = build_view_model(&mut app, 0, 10, 80);
 
         assert_eq!(vm.content.match_count, 2);
         assert_eq!(vm.content.current_match, None);
@@ -583,7 +625,7 @@ mod tests {
         app.content_scroll = 2;
         app.content_search_query = "target".to_string();
 
-        let vm = build_view_model(&mut app, 0, 10);
+        let vm = build_view_model(&mut app, 0, 10, 80);
 
         assert_eq!(vm.content.match_count, 3);
         assert_eq!(vm.content.current_match, Some(2));
@@ -598,7 +640,7 @@ mod tests {
         app.content_scroll = 0;
         app.content_search_query = "zzz".to_string();
 
-        let vm = build_view_model(&mut app, 0, 10);
+        let vm = build_view_model(&mut app, 0, 10, 80);
 
         assert_eq!(vm.content.match_count, 0);
         assert_eq!(vm.content.current_match, None);
@@ -624,7 +666,7 @@ mod tests {
         app.content_scroll = 0;
         app.content_search_query = "target".to_string();
 
-        let vm = build_view_model(&mut app, 0, 3);
+        let vm = build_view_model(&mut app, 0, 3, 80);
 
         assert_eq!(vm.content.match_count, 3);
         assert_eq!(vm.content.current_match, Some(1));
@@ -651,7 +693,7 @@ mod tests {
         ];
         app.content_cursor = 0;
 
-        let vm = build_view_model(&mut app, 0, 10);
+        let vm = build_view_model(&mut app, 0, 10, 80);
 
         // The whole block (lines 0..3) is marked in the gutter channel; no
         // text highlight (no search active).
@@ -675,7 +717,7 @@ mod tests {
         ];
         app.content_cursor = 1;
 
-        let vm = build_view_model(&mut app, 0, 10);
+        let vm = build_view_model(&mut app, 0, 10, 80);
 
         assert_eq!(vm.content.cursor_block, vec![false, true, false]);
     }
@@ -692,7 +734,7 @@ mod tests {
         app.content_lines = vec![make_line_indent("A", 0), make_line_indent("A1", 1)];
         app.content_cursor = 0;
 
-        let vm = build_view_model(&mut app, 0, 10);
+        let vm = build_view_model(&mut app, 0, 10, 80);
 
         // Gutter is gated on content being focused: no bar while the browser
         // pane is active.
@@ -722,7 +764,7 @@ mod tests {
         app.content_scroll = 1; // the active search match is line 1
         app.content_search_query = "target".to_string();
 
-        let vm = build_view_model(&mut app, 0, 10);
+        let vm = build_view_model(&mut app, 0, 10, 80);
 
         // visible_lines starts at content_scroll (1): index 0 -> line 1, index 1 -> line 2
         // Line 1 is the active match (Current text highlight) AND the cursor
@@ -750,7 +792,7 @@ mod tests {
         app.content_scroll = 0; // line 0 isn't a match, so there is no "current" match line
         app.content_search_query = "target".to_string();
 
-        let vm = build_view_model(&mut app, 0, 10);
+        let vm = build_view_model(&mut app, 0, 10, 80);
 
         assert_eq!(vm.content.current_match, None);
         // Line 1 matches the search query AND is inside the cursor block:

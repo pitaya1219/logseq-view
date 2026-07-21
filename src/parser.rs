@@ -268,6 +268,144 @@ pub fn line_to_plain_text(line: &ParsedLine) -> String {
     text
 }
 
+/// What kind of thing a `DisplayFragment` is, e.g. for `ui::render_line` to
+/// pick a style. Purely a label -- carries no styling itself, so this stays
+/// framework-agnostic.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FragmentKind {
+    Indent,
+    Bullet,
+    TaskLabel(TaskState),
+    Plain,
+    PageLink,
+    Tag,
+    Bold,
+    Italic,
+    Code,
+    BlockRef,
+    PropertyKey,
+    PropertySeparator,
+    PropertyValue,
+}
+
+/// One labeled piece of a `ParsedLine`'s displayed text, in render order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DisplayFragment {
+    pub text: String,
+    pub kind: FragmentKind,
+}
+
+/// Breaks a `ParsedLine` down into the exact sequence of text fragments it
+/// displays as -- indent, bullet marker, task-state label, and segment
+/// decorations (`[[page links]]`, `#tags`, `((block refs))`, `key:: val`
+/// properties). This is the SINGLE place that text exists: `ui::render_line`
+/// consumes these fragments and attaches a style to each `kind` rather than
+/// reconstructing the text itself, and `line_display_text` (used by
+/// `line_row_count` for wrap-row math) just concatenates them. Because both
+/// read from the same fragments, they cannot drift apart the way two
+/// independent text-building implementations could -- which is exactly the
+/// failure mode that let #71's "lines pushed off screen" bug happen in the
+/// first place (the scroll model and the renderer silently disagreeing about
+/// what a line's rows actually contain).
+pub fn line_display_fragments(line: &ParsedLine) -> Vec<DisplayFragment> {
+    let mut fragments = Vec::new();
+
+    if line.indent > 0 {
+        fragments.push(DisplayFragment {
+            text: "  ".repeat(line.indent),
+            kind: FragmentKind::Indent,
+        });
+    }
+
+    if line.is_bullet {
+        let bullet = match line.task {
+            Some(TaskState::Done) | Some(TaskState::Cancelled) => "✓ ",
+            Some(_) => "○ ",
+            None => "• ",
+        };
+        fragments.push(DisplayFragment {
+            text: bullet.to_string(),
+            kind: FragmentKind::Bullet,
+        });
+    }
+
+    if let Some(ref task) = line.task {
+        fragments.push(DisplayFragment {
+            text: format!("{} ", task.keyword()),
+            kind: FragmentKind::TaskLabel(task.clone()),
+        });
+    }
+
+    for segment in &line.segments {
+        match segment {
+            Segment::Plain(s) => fragments.push(DisplayFragment {
+                text: s.clone(),
+                kind: FragmentKind::Plain,
+            }),
+            Segment::PageLink(s) => fragments.push(DisplayFragment {
+                text: format!("[[{}]]", s),
+                kind: FragmentKind::PageLink,
+            }),
+            Segment::Tag(s) => fragments.push(DisplayFragment {
+                text: format!("#{}", s),
+                kind: FragmentKind::Tag,
+            }),
+            Segment::Bold(s) => fragments.push(DisplayFragment {
+                text: s.clone(),
+                kind: FragmentKind::Bold,
+            }),
+            Segment::Italic(s) => fragments.push(DisplayFragment {
+                text: s.clone(),
+                kind: FragmentKind::Italic,
+            }),
+            Segment::Code(s) => fragments.push(DisplayFragment {
+                text: s.clone(),
+                kind: FragmentKind::Code,
+            }),
+            Segment::BlockRef(s) => {
+                let preview: String = s.chars().take(8).collect();
+                fragments.push(DisplayFragment {
+                    text: format!("(({}…))", preview),
+                    kind: FragmentKind::BlockRef,
+                });
+            }
+            Segment::Property(key, val) => {
+                fragments.push(DisplayFragment {
+                    text: key.clone(),
+                    kind: FragmentKind::PropertyKey,
+                });
+                fragments.push(DisplayFragment {
+                    text: ":: ".to_string(),
+                    kind: FragmentKind::PropertySeparator,
+                });
+                fragments.push(DisplayFragment {
+                    text: val.clone(),
+                    kind: FragmentKind::PropertyValue,
+                });
+            }
+        }
+    }
+
+    fragments
+}
+
+/// The full text of a `ParsedLine` exactly as it's displayed (see
+/// `line_display_fragments`), which is what `line_row_count` needs to
+/// measure the width `ui::render_line`'s output actually occupies.
+pub fn line_display_text(line: &ParsedLine) -> String {
+    line_display_fragments(line)
+        .iter()
+        .map(|f| f.text.as_str())
+        .collect()
+}
+
+/// The number of wrapped terminal rows `line` needs at `width` columns.
+/// Centralizes `line_display_text` + `wrap::row_count` so every caller
+/// (scroll clamp, windowing, scrollbar) measures rows the same way.
+pub fn line_row_count(line: &ParsedLine, width: usize) -> usize {
+    crate::wrap::row_count(&line_display_text(line), width)
+}
+
 fn extract_task_state(s: &str) -> (Option<TaskState>, &str) {
     const STATES: &[(&str, TaskState)] = &[
         ("TODO ", TaskState::Todo),
@@ -414,6 +552,96 @@ fn parse_inline(s: &str) -> Vec<Segment> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ============ line_display_text / line_row_count tests ============
+
+    #[test]
+    fn line_display_text_includes_indent_bullet_and_task_label() {
+        let line = ParsedLine {
+            indent: 2,
+            is_bullet: true,
+            task: Some(TaskState::Todo),
+            segments: vec![Segment::Plain("write tests".to_string())],
+            ..Default::default()
+        };
+        assert_eq!(line_display_text(&line), "    ○ TODO write tests");
+    }
+
+    #[test]
+    fn line_display_text_marks_done_and_cancelled_with_check() {
+        let line = ParsedLine {
+            indent: 0,
+            is_bullet: true,
+            task: Some(TaskState::Done),
+            segments: vec![Segment::Plain("shipped".to_string())],
+            ..Default::default()
+        };
+        assert_eq!(line_display_text(&line), "✓ DONE shipped");
+    }
+
+    #[test]
+    fn line_display_text_wraps_segments_like_render_line() {
+        let line = ParsedLine {
+            indent: 0,
+            is_bullet: false,
+            task: None,
+            segments: vec![
+                Segment::Plain("see ".to_string()),
+                Segment::PageLink("Other Page".to_string()),
+                Segment::Plain(" and ".to_string()),
+                Segment::Tag("logseq".to_string()),
+                Segment::Plain(" re ".to_string()),
+                Segment::BlockRef("0123456789".to_string()),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            line_display_text(&line),
+            "see [[Other Page]] and #logseq re ((01234567…))"
+        );
+    }
+
+    #[test]
+    fn line_display_text_property_matches_key_double_colon_val() {
+        let line = ParsedLine {
+            indent: 0,
+            is_bullet: false,
+            task: None,
+            segments: vec![Segment::Property(
+                "status".to_string(),
+                "active".to_string(),
+            )],
+            ..Default::default()
+        };
+        assert_eq!(line_display_text(&line), "status:: active");
+    }
+
+    #[test]
+    fn line_row_count_matches_wrap_row_count_of_display_text() {
+        let line = ParsedLine {
+            indent: 0,
+            is_bullet: false,
+            task: None,
+            segments: vec![Segment::Plain("x".repeat(200))],
+            ..Default::default()
+        };
+        assert_eq!(
+            line_row_count(&line, 19),
+            crate::wrap::row_count(&"x".repeat(200), 19)
+        );
+    }
+
+    #[test]
+    fn line_row_count_is_one_for_a_short_line() {
+        let line = ParsedLine {
+            indent: 0,
+            is_bullet: false,
+            task: None,
+            segments: vec![Segment::Plain("short".to_string())],
+            ..Default::default()
+        };
+        assert_eq!(line_row_count(&line, 80), 1);
+    }
 
     // ============ parse_inline tests ============
 

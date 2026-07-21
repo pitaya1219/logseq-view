@@ -808,22 +808,95 @@ impl<S: GraphSource> App<S> {
         }
     }
 
-    pub(crate) fn clamp_content_scroll(&mut self, visible_height: usize) {
+    /// Row-aware version of the old line-count clamp: a `ParsedLine` can now
+    /// wrap into more than one terminal row, so "past the end" has to be
+    /// measured in rows, not lines. Pulls `content_scroll` back just far
+    /// enough that the lines from it to EOF fill (rather than fall short of)
+    /// `visible_height` rows, mirroring the old `total - visible_height`
+    /// line-count clamp.
+    ///
+    /// `row_counts[i]` must be the wrapped-row count of `content_lines[i]`
+    /// (see `parser::line_row_count`) -- the caller (`view_model`) computes
+    /// this once per frame and passes it in, rather than each clamp call
+    /// re-measuring every line's text width from scratch.
+    pub(crate) fn clamp_content_scroll(&mut self, visible_height: usize, row_counts: &[usize]) {
+        debug_assert_eq!(
+            row_counts.len(),
+            self.content_lines.len(),
+            "row_counts must have one entry per content_lines entry"
+        );
         let total = self.content_lines.len();
-        if self.content_scroll + visible_height > total && total > visible_height {
-            self.content_scroll = total - visible_height;
+        if total == 0 {
+            self.content_scroll = 0;
+            return;
+        }
+        self.content_scroll = self.content_scroll.min(total - 1);
+
+        // Mirrors the old `total > visible_height` guard: only pull scroll
+        // back if the file has more rows than the viewport can show at once
+        // -- otherwise everything already fits and scroll shouldn't move
+        // just because it happens to sit above some slack at the bottom.
+        let total_rows: usize = row_counts.iter().sum();
+        if total_rows <= visible_height {
+            return;
+        }
+
+        let mut rows: usize = 0;
+        for &row_count in &row_counts[self.content_scroll..] {
+            rows += row_count;
+            if rows >= visible_height {
+                return;
+            }
+        }
+
+        // Not enough rows from content_scroll to fill the viewport: pull
+        // content_scroll back toward 0 until the tail exactly fills it (or
+        // we run out of lines).
+        while self.content_scroll > 0 && rows < visible_height {
+            self.content_scroll -= 1;
+            rows += row_counts[self.content_scroll];
         }
     }
 
     /// Adjusts `content_scroll` so `content_cursor` stays within the visible
     /// window, mirroring `clamp_browser_scroll`'s selection-follows-viewport
     /// pattern (`browser_selected` / `browser_offset`) for the content pane
-    /// (`content_cursor` / `content_scroll`).
-    pub(crate) fn clamp_content_cursor_scroll(&mut self, visible_height: usize) {
-        if self.content_cursor < self.content_scroll {
-            self.content_scroll = self.content_cursor;
-        } else if self.content_cursor >= self.content_scroll + visible_height {
-            self.content_scroll = self.content_cursor + 1 - visible_height;
+    /// (`content_cursor` / `content_scroll`). Row-aware: walks backward from
+    /// the cursor's line accumulating wrapped-row counts until either the row
+    /// budget is spent (the cursor's line becomes the last one that fits,
+    /// sliding scroll forward just enough) or `content_scroll` is reached
+    /// (cursor already visible). See `clamp_content_scroll` for `row_counts`.
+    pub(crate) fn clamp_content_cursor_scroll(
+        &mut self,
+        visible_height: usize,
+        row_counts: &[usize],
+    ) {
+        debug_assert_eq!(
+            row_counts.len(),
+            self.content_lines.len(),
+            "row_counts must have one entry per content_lines entry"
+        );
+        if self.content_lines.is_empty() {
+            return;
+        }
+        let cursor = self.content_cursor.min(self.content_lines.len() - 1);
+        if cursor < self.content_scroll {
+            self.content_scroll = cursor;
+            return;
+        }
+
+        let mut rows = 0usize;
+        let mut idx = cursor;
+        loop {
+            rows += row_counts[idx];
+            if rows > visible_height {
+                self.content_scroll = self.content_scroll.max((idx + 1).min(cursor));
+                return;
+            }
+            if idx == self.content_scroll {
+                return;
+            }
+            idx -= 1;
         }
     }
 
@@ -928,6 +1001,28 @@ mod tests {
             .collect()
     }
 
+    /// A single-segment `ParsedLine` of `len` 'x' characters and no
+    /// indent/bullet/task decoration, so its `line_row_count` is exactly
+    /// `ceil(len / width)`.
+    fn long_line(len: usize) -> ParsedLine {
+        ParsedLine {
+            indent: 0,
+            is_bullet: false,
+            task: None,
+            segments: vec![Segment::Plain("x".repeat(len))],
+            ..Default::default()
+        }
+    }
+
+    /// Mirrors what `view_model::build_content_view` computes once per frame
+    /// and passes into the clamp methods -- see `App::clamp_content_scroll`.
+    fn row_counts(lines: &[ParsedLine], width: usize) -> Vec<usize> {
+        lines
+            .iter()
+            .map(|l| crate::parser::line_row_count(l, width))
+            .collect()
+    }
+
     // --- url_decode tests ---
 
     #[test]
@@ -984,13 +1079,17 @@ mod tests {
     }
 
     // --- clamp_content_scroll ---
+    // `dummy_lines` produce empty ParsedLines, i.e. one row each regardless
+    // of width, so these first few tests reduce to exactly the old
+    // line-count math -- width is passed but never binding.
 
     #[test]
     fn content_scroll_clamped_when_past_end() {
         let mut app = make_app();
         app.content_lines = dummy_lines(20);
         app.content_scroll = 15;
-        app.clamp_content_scroll(10);
+        let rc = row_counts(&app.content_lines, 80);
+        app.clamp_content_scroll(10, &rc);
         assert_eq!(app.content_scroll, 10);
     }
 
@@ -999,7 +1098,8 @@ mod tests {
         let mut app = make_app();
         app.content_lines = dummy_lines(5);
         app.content_scroll = 0;
-        app.clamp_content_scroll(10);
+        let rc = row_counts(&app.content_lines, 80);
+        app.clamp_content_scroll(10, &rc);
         assert_eq!(app.content_scroll, 0);
     }
 
@@ -1008,8 +1108,38 @@ mod tests {
         let mut app = make_app();
         app.content_lines = dummy_lines(20);
         app.content_scroll = 10;
-        app.clamp_content_scroll(10);
+        let rc = row_counts(&app.content_lines, 80);
+        app.clamp_content_scroll(10, &rc);
         assert_eq!(app.content_scroll, 10);
+    }
+
+    #[test]
+    fn content_scroll_pulled_back_further_when_a_line_wraps_into_multiple_rows() {
+        // Regression target for #71/#74: one of the last lines wraps into 4
+        // rows at this width, so scrolling to line 15 of 20 (5 lines from
+        // EOF = 8 rows) overflows a 6-row viewport and must be pulled back
+        // further than the old 1-line-1-row math would.
+        let mut app = make_app();
+        let mut lines = dummy_lines(20);
+        lines[17] = long_line(80); // wraps to 4 rows at width 20
+        app.content_lines = lines;
+        app.content_scroll = 15;
+        let rc = row_counts(&app.content_lines, 20);
+        app.clamp_content_scroll(6, &rc);
+        // Rows from 15..20: line15(1)+16(1)+17(4)+18(1)+19(1) = 8 >= 6, so
+        // scroll=15 already fits -- confirms the row math is actually being
+        // used (a naive line-count clamp would also leave scroll at 15 here
+        // since total(20) - visible_height(6) = 14 < 15, so this alone
+        // doesn't prove row-awareness; the assertion below does).
+        assert_eq!(app.content_scroll, 15);
+
+        // Now push scroll deeper: from line 17 onward (the wrapped line
+        // itself + 2 short lines after it) is only 4+1+1 = 6 rows -- exactly
+        // fits, so scroll should NOT be pulled back past 17.
+        app.content_scroll = 19;
+        let rc = row_counts(&app.content_lines, 20);
+        app.clamp_content_scroll(6, &rc);
+        assert_eq!(app.content_scroll, 17);
     }
 
     // --- clamp_content_cursor_scroll (cursor-follows-viewport, mirrors
@@ -1018,27 +1148,67 @@ mod tests {
     #[test]
     fn content_cursor_scroll_cursor_before_offset_clamps_up() {
         let mut app = make_app();
+        app.content_lines = dummy_lines(10);
         app.content_scroll = 5;
         app.content_cursor = 3;
-        app.clamp_content_cursor_scroll(10);
+        let rc = row_counts(&app.content_lines, 80);
+        app.clamp_content_cursor_scroll(10, &rc);
         assert_eq!(app.content_scroll, 3);
     }
 
     #[test]
     fn content_cursor_scroll_cursor_past_window_slides_down() {
         let mut app = make_app();
+        app.content_lines = dummy_lines(11);
         app.content_scroll = 0;
         app.content_cursor = 10;
-        app.clamp_content_cursor_scroll(5);
+        let rc = row_counts(&app.content_lines, 80);
+        app.clamp_content_cursor_scroll(5, &rc);
         assert_eq!(app.content_scroll, 6);
     }
 
     #[test]
     fn content_cursor_scroll_cursor_within_window_unchanged() {
         let mut app = make_app();
+        app.content_lines = dummy_lines(10);
         app.content_scroll = 2;
         app.content_cursor = 4;
-        app.clamp_content_cursor_scroll(10);
+        let rc = row_counts(&app.content_lines, 80);
+        app.clamp_content_cursor_scroll(10, &rc);
+        assert_eq!(app.content_scroll, 2);
+    }
+
+    #[test]
+    fn content_cursor_scroll_slides_further_when_a_line_between_wraps() {
+        // A wrapped line between content_scroll and the cursor eats extra
+        // row budget, so the scroll has to slide down further than the old
+        // 1-line-1-row math would to keep the cursor's line visible.
+        let mut app = make_app();
+        let mut lines = dummy_lines(10);
+        lines[3] = long_line(80); // wraps to 4 rows at width 20
+        app.content_lines = lines;
+        app.content_scroll = 0;
+        app.content_cursor = 6;
+        let rc = row_counts(&app.content_lines, 20);
+        app.clamp_content_cursor_scroll(6, &rc);
+        // Rows 6,5,4,3(4 rows) sum to 1+1+1+4=7 > 6, so scroll must land
+        // just after the wrapped line (index 4), not at content_scroll=0.
+        assert_eq!(app.content_scroll, 4);
+    }
+
+    #[test]
+    fn content_cursor_scroll_handles_single_line_taller_than_viewport() {
+        // A line alone wider than the whole viewport (e.g. after jumping
+        // straight to it) must not panic or leave scroll before it --
+        // best effort is showing as much of that one line as fits.
+        let mut app = make_app();
+        let mut lines = dummy_lines(5);
+        lines[2] = long_line(200); // wraps to 10 rows at width 20
+        app.content_lines = lines;
+        app.content_scroll = 0;
+        app.content_cursor = 2;
+        let rc = row_counts(&app.content_lines, 20);
+        app.clamp_content_cursor_scroll(6, &rc);
         assert_eq!(app.content_scroll, 2);
     }
 

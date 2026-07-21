@@ -1,5 +1,5 @@
 use crate::app::Focus;
-use crate::parser::{ParsedLine, Segment, TaskState};
+use crate::parser::{FragmentKind, ParsedLine, TaskState};
 use crate::source::GraphSource;
 use crate::view_model::{LineHighlight, ViewModel};
 use ratatui::{
@@ -13,122 +13,113 @@ use ratatui::{
     Frame,
 };
 
-fn render_line(parsed: &ParsedLine) -> Line<'static> {
-    let mut spans: Vec<Span<'static>> = Vec::new();
+/// Columns `draw_content` reserves in front of the text for the cursor-block
+/// gutter bar (see the `gutter` span built in `draw_content`). Subtracted
+/// from the pane's inner width before it's used as `wrap_width`, so wrapping
+/// never assumes the gutter column is available for text.
+const CONTENT_GUTTER_COLS: usize = 1;
 
-    if parsed.indent > 0 {
-        spans.push(Span::raw("  ".repeat(parsed.indent)));
+/// Word-wraps a line's styled spans to `width` columns, splitting spans at
+/// row boundaries while preserving each fragment's original style. Backed by
+/// `wrap::wrap_row_ranges` -- see the comment at its call site in
+/// `draw_content` for why this exists instead of `Paragraph::wrap()`.
+fn wrap_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>> {
+    let mut full_text = String::new();
+    let mut span_ranges: Vec<(std::ops::Range<usize>, Style)> = Vec::with_capacity(spans.len());
+    for span in &spans {
+        let start = full_text.len();
+        full_text.push_str(&span.content);
+        span_ranges.push((start..full_text.len(), span.style));
     }
 
-    if parsed.is_bullet {
-        let bullet_char = match parsed.task {
-            Some(TaskState::Done) | Some(TaskState::Cancelled) => "✓ ",
-            Some(_) => "○ ",
-            None => "• ",
-        };
-        let style = Style::default().fg(Color::DarkGray);
-        spans.push(Span::styled(bullet_char.to_string(), style));
-    }
+    crate::wrap::wrap_row_ranges(&full_text, width)
+        .into_iter()
+        .map(|row_range| {
+            span_ranges
+                .iter()
+                .filter_map(|(span_range, style)| {
+                    let start = span_range.start.max(row_range.start);
+                    let end = span_range.end.min(row_range.end);
+                    if start < end {
+                        Some(Span::styled(full_text[start..end].to_string(), *style))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
 
-    if let Some(ref state) = parsed.task {
-        let (label, style) = match state {
-            TaskState::Todo => (
-                "TODO",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            TaskState::Done => (
-                "DONE",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::DIM),
-            ),
-            TaskState::Later => ("LATER", Style::default().fg(Color::Blue)),
-            TaskState::Now => (
-                "NOW",
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            TaskState::Waiting => ("WAITING", Style::default().fg(Color::Cyan)),
-            TaskState::Cancelled => (
-                "CANCELLED",
+/// The style for one `DisplayFragment`, given whether the line as a whole is
+/// a completed/cancelled task (which dims its `Plain` text -- a line-level
+/// fact, not a per-fragment one, so it's threaded in separately rather than
+/// carried on `FragmentKind` itself).
+fn style_for_fragment(kind: &FragmentKind, dim_plain_text: bool) -> Style {
+    match kind {
+        FragmentKind::Indent => Style::default(),
+        FragmentKind::Bullet => Style::default().fg(Color::DarkGray),
+        FragmentKind::TaskLabel(state) => match state {
+            TaskState::Todo => Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+            TaskState::Done => Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::DIM),
+            TaskState::Later => Style::default().fg(Color::Blue),
+            TaskState::Now => Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+            TaskState::Waiting => Style::default().fg(Color::Cyan),
+            TaskState::Cancelled => Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::CROSSED_OUT),
+        },
+        FragmentKind::Plain => {
+            if dim_plain_text {
                 Style::default()
                     .fg(Color::DarkGray)
-                    .add_modifier(Modifier::CROSSED_OUT),
-            ),
-        };
-        spans.push(Span::styled(label.to_string(), style));
-        spans.push(Span::raw(" "));
-    }
-
-    for seg in &parsed.segments {
-        match seg {
-            Segment::Plain(s) => {
-                let style = if matches!(
-                    parsed.task,
-                    Some(TaskState::Done) | Some(TaskState::Cancelled)
-                ) {
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::DIM)
-                } else {
-                    Style::default()
-                };
-                spans.push(Span::styled(s.clone(), style));
-            }
-            Segment::PageLink(s) => {
-                spans.push(Span::styled(
-                    format!("[[{}]]", s),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::UNDERLINED),
-                ));
-            }
-            Segment::Tag(s) => {
-                spans.push(Span::styled(
-                    format!("#{}", s),
-                    Style::default().fg(Color::Green),
-                ));
-            }
-            Segment::Bold(s) => {
-                spans.push(Span::styled(
-                    s.clone(),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ));
-            }
-            Segment::Italic(s) => {
-                spans.push(Span::styled(
-                    s.clone(),
-                    Style::default().add_modifier(Modifier::ITALIC),
-                ));
-            }
-            Segment::Code(s) => {
-                spans.push(Span::styled(
-                    s.clone(),
-                    Style::default().fg(Color::Yellow).bg(Color::DarkGray),
-                ));
-            }
-            Segment::BlockRef(s) => {
-                let preview: String = s.chars().take(8).collect();
-                spans.push(Span::styled(
-                    format!("(({}…))", preview),
-                    Style::default().fg(Color::Magenta),
-                ));
-            }
-            Segment::Property(key, val) => {
-                spans.push(Span::styled(
-                    key.clone(),
-                    Style::default()
-                        .fg(Color::Blue)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                spans.push(Span::styled(":: ", Style::default().fg(Color::DarkGray)));
-                spans.push(Span::raw(val.clone()));
+                    .add_modifier(Modifier::DIM)
+            } else {
+                Style::default()
             }
         }
+        FragmentKind::PageLink => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::UNDERLINED),
+        FragmentKind::Tag => Style::default().fg(Color::Green),
+        FragmentKind::Bold => Style::default().add_modifier(Modifier::BOLD),
+        FragmentKind::Italic => Style::default().add_modifier(Modifier::ITALIC),
+        FragmentKind::Code => Style::default().fg(Color::Yellow).bg(Color::DarkGray),
+        FragmentKind::BlockRef => Style::default().fg(Color::Magenta),
+        FragmentKind::PropertyKey => Style::default()
+            .fg(Color::Blue)
+            .add_modifier(Modifier::BOLD),
+        FragmentKind::PropertySeparator => Style::default().fg(Color::DarkGray),
+        FragmentKind::PropertyValue => Style::default(),
     }
+}
+
+/// Renders a `ParsedLine` by styling `parser::line_display_fragments`'
+/// output -- the ONLY place that line's text is built. This function decides
+/// how each fragment looks; it never reconstructs what the fragment's text
+/// is, so it can't drift from `line_display_text`/`line_row_count` (used for
+/// wrap-row math) the way two independent text-building implementations
+/// could. See the doc comment on `line_display_fragments` for why that
+/// matters (#71).
+fn render_line(parsed: &ParsedLine) -> Line<'static> {
+    let dim_plain_text = matches!(
+        parsed.task,
+        Some(TaskState::Done) | Some(TaskState::Cancelled)
+    );
+
+    let spans: Vec<Span<'static>> = crate::parser::line_display_fragments(parsed)
+        .into_iter()
+        .map(|fragment| {
+            let style = style_for_fragment(&fragment.kind, dim_plain_text);
+            Span::styled(fragment.text, style)
+        })
+        .collect();
 
     Line::from(spans)
 }
@@ -149,11 +140,21 @@ pub fn draw<S: GraphSource>(f: &mut Frame, app: &mut crate::app::App<S>) {
     // Clamping must use this inner height, otherwise the selection/scroll can sit
     // up to 2 rows below the visible area (selection clipped at the bottom).
     const BORDER_ROWS: usize = 2;
+    // Left + right borders (2 cols) plus the one-column cursor-block gutter
+    // `draw_content` always reserves in front of the text (see `CONTENT_GUTTER_COLS`).
+    const BORDER_COLS: usize = 2;
     let browser_visible_height = (main_chunks[0].height as usize).saturating_sub(BORDER_ROWS);
     let content_visible_height = (main_chunks[1].height as usize).saturating_sub(BORDER_ROWS);
+    let content_visible_width = (main_chunks[1].width as usize)
+        .saturating_sub(BORDER_COLS)
+        .saturating_sub(CONTENT_GUTTER_COLS);
 
-    let vm =
-        crate::view_model::build_view_model(app, browser_visible_height, content_visible_height);
+    let vm = crate::view_model::build_view_model(
+        app,
+        browser_visible_height,
+        content_visible_height,
+        content_visible_width,
+    );
 
     draw_browser(f, &vm, main_chunks[0]);
     draw_content(f, &vm, main_chunks[1]);
@@ -249,18 +250,24 @@ fn draw_content(f: &mut Frame, vm: &ViewModel, area: Rect) {
         return;
     }
 
-    // Build styled lines: a left-column gutter bar marks the current block,
+    // Build styled rows: a left-column gutter bar marks the current block,
     // and the text carries the (search-only) highlight. The two are separate
-    // channels, so a line can show both at once.
+    // channels, so a line can show both at once. Each logical line can wrap
+    // into more than one terminal row (`wrap_spans`, at `vm.content.wrap_width`
+    // -- the SAME width `view_model::build_content_view` used to decide which
+    // lines fit, per the invariant documented on `ContentView::wrap_width`);
+    // the gutter/highlight styling is repeated on every wrapped row of a
+    // line so a highlighted or cursor-block line reads as one continuous
+    // block rather than just its first row.
     let lines: Vec<Line> = vm
         .content
         .visible_lines
         .iter()
         .zip(vm.content.line_highlights.iter())
         .zip(vm.content.cursor_block.iter())
-        .map(|((line, highlight), in_cursor_block)| {
+        .flat_map(|((line, highlight), in_cursor_block)| {
             let base_line = render_line(line);
-            let mut text_spans: Vec<Span> = match highlight {
+            let text_spans: Vec<Span> = match highlight {
                 LineHighlight::Current => base_line
                     .spans
                     .into_iter()
@@ -274,8 +281,8 @@ fn draw_content(f: &mut Frame, vm: &ViewModel, area: Rect) {
                 LineHighlight::None => base_line.spans,
             };
 
-            // Every line gets a one-column gutter so the text stays aligned;
-            // only cursor-block lines show the bar (in the otherwise empty
+            // Every row gets a one-column gutter so the text stays aligned;
+            // only cursor-block rows show the bar (in the otherwise empty
             // leading column — no character or bullet there).
             let gutter = if *in_cursor_block {
                 Span::styled("▎", Style::default().fg(Color::Cyan))
@@ -283,20 +290,26 @@ fn draw_content(f: &mut Frame, vm: &ViewModel, area: Rect) {
                 Span::raw(" ")
             };
 
-            let mut spans = Vec::with_capacity(text_spans.len() + 1);
-            spans.push(gutter);
-            spans.append(&mut text_spans);
-            Line::from(spans)
+            wrap_spans(text_spans, vm.content.wrap_width)
+                .into_iter()
+                .map(move |row_spans| {
+                    let mut spans = Vec::with_capacity(row_spans.len() + 1);
+                    spans.push(gutter.clone());
+                    spans.extend(row_spans);
+                    Line::from(spans)
+                })
+                .collect::<Vec<_>>()
         })
         .collect();
 
-    // Deliberately not wrapped: every part of the scroll/cursor model
-    // (`content_scroll`, `clamp_content_cursor_scroll`, the scrollbar,
-    // the cursor-block gutter) assumes one `ParsedLine` maps to exactly one
-    // terminal row. Wrapping breaks that invariant — a long line can expand
-    // into several rows and silently eat the fixed row-budget, pushing
-    // later lines that the scroll math still considers "visible" off the
-    // bottom of the pane entirely. Overflowing lines are truncated instead.
+    // ratatui's own `Paragraph::wrap()` isn't used: the scroll/cursor model
+    // (`content_scroll`, `clamp_content_cursor_scroll`, the scrollbar) needs
+    // to know exactly how many rows a line will take BEFORE rendering, and a
+    // widget's internal wrap algorithm isn't something callers can predict
+    // from the outside. `wrap_spans` (backed by `wrap::wrap_row_ranges`) is
+    // the single algorithm both this function and `view_model` use, so the
+    // two can never disagree about row counts the way truncation was papering
+    // over after #71.
     let paragraph = Paragraph::new(lines);
     f.render_widget(paragraph, inner);
 
@@ -495,45 +508,172 @@ mod tests {
         );
     }
 
+    /// `render_line` styles `parser::line_display_fragments`' output without
+    /// altering the fragment text itself (see `render_line`'s doc comment),
+    /// so its rendered text is always exactly `line_display_text` -- no
+    /// separate cross-check needed; this just documents the invariant with a
+    /// couple of representative lines.
     #[test]
-    fn long_line_does_not_clip_later_lines_out_of_view() {
-        // Regression: content used Paragraph::wrap(), which lets one long
-        // ParsedLine expand into several terminal rows. Every other part of
-        // the scroll model (content_scroll, clamp_content_cursor_scroll, the
-        // scrollbar) assumes one ParsedLine == one row, so a wrapped line
-        // could silently eat the fixed row-budget and push later lines —
-        // still considered "visible" by that line-count math — off the
-        // bottom of the pane. Content must truncate long lines instead of
-        // wrapping them, so every line in the visible window gets its row.
-        use crate::parser::ParsedLine;
-        let mut app = App::new(PathBuf::new(), FakeGraphSource::new()).unwrap();
-        app.file_items.clear();
-        app.current_file = Some(PathBuf::from("test.md"));
-        let mut lines: Vec<ParsedLine> = (0..10)
-            .map(|i| ParsedLine {
+    fn render_line_text_matches_line_display_text() {
+        use crate::parser::{Segment, TaskState};
+
+        fn rendered_plain_text(line: &crate::parser::ParsedLine) -> String {
+            render_line(line)
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect()
+        }
+
+        let cases = vec![
+            crate::parser::ParsedLine {
+                indent: 2,
+                is_bullet: true,
+                task: Some(TaskState::Todo),
+                segments: vec![Segment::Plain("plain text".to_string())],
+                ..Default::default()
+            },
+            crate::parser::ParsedLine {
+                indent: 1,
+                is_bullet: true,
+                task: None,
+                segments: vec![
+                    Segment::Plain("see ".to_string()),
+                    Segment::PageLink("Other Page".to_string()),
+                    Segment::Tag("logseq".to_string()),
+                    Segment::BlockRef("0123456789abcdef".to_string()),
+                ],
+                ..Default::default()
+            },
+            crate::parser::ParsedLine {
                 indent: 0,
                 is_bullet: false,
                 task: None,
-                segments: vec![crate::parser::Segment::Plain(format!("line{i}"))],
+                segments: vec![Segment::Property(
+                    "status".to_string(),
+                    "active".to_string(),
+                )],
                 ..Default::default()
-            })
-            .collect();
-        lines[3] = ParsedLine {
+            },
+        ];
+
+        for line in &cases {
+            assert_eq!(
+                crate::parser::line_display_text(line),
+                rendered_plain_text(line),
+            );
+        }
+    }
+
+    fn plain_line(text: &str) -> crate::parser::ParsedLine {
+        crate::parser::ParsedLine {
             indent: 0,
             is_bullet: false,
             task: None,
-            segments: vec![crate::parser::Segment::Plain("x".repeat(200))],
+            segments: vec![crate::parser::Segment::Plain(text.to_string())],
             ..Default::default()
-        };
+        }
+    }
+
+    #[test]
+    fn long_line_is_wrapped_not_truncated() {
+        // The point of wrapping instead of truncating (see #71, and the
+        // proper fix here): a long line's full text must actually be
+        // readable, not cut off at the pane's width. A marker placed at the
+        // very end of a long line only shows up in the rendered buffer if
+        // the line wrapped onto further rows instead of being clipped.
+        let mut app = App::new(PathBuf::new(), FakeGraphSource::new()).unwrap();
+        app.file_items.clear();
+        app.current_file = Some(PathBuf::from("test.md"));
+        app.content_lines = vec![plain_line(&format!("{}TAILMARKER", "x".repeat(60)))];
+        app.focus = Focus::Content;
+
+        let text = rendered_text(40, 20, &mut app);
+        assert!(
+            text.contains("TAILMARKER"),
+            "the end of a long line must be visible once wrapped, not truncated.\nBuffer:\n{text}"
+        );
+    }
+
+    #[test]
+    fn later_lines_stay_visible_alongside_a_wrapped_line_when_room_allows() {
+        // A moderately long line pushes later lines down by however many
+        // extra rows it needs (row-aware scroll math), but doesn't have to
+        // evict them entirely as long as the viewport has room for both.
+        let mut app = App::new(PathBuf::new(), FakeGraphSource::new()).unwrap();
+        app.file_items.clear();
+        app.current_file = Some(PathBuf::from("test.md"));
+        let mut lines: Vec<crate::parser::ParsedLine> =
+            (0..6).map(|i| plain_line(&format!("line{i}"))).collect();
+        lines[2] = plain_line(&"x".repeat(60)); // wraps to a handful of rows
         app.content_lines = lines;
         app.focus = Focus::Content;
-        app.content_cursor = 1;
-        app.content_scroll = 1; // window: line1, line2, (long line3), line4..line9
 
-        let text = rendered_text(30, 12, &mut app);
+        let text = rendered_text(40, 20, &mut app);
         assert!(
-            text.contains("line8") && text.contains("line9"),
-            "lines after the wrapped long line should still be visible.\nBuffer:\n{text}"
+            text.contains("line4") && text.contains("line5"),
+            "later lines should remain visible when the viewport has room for the wrapped line too.\nBuffer:\n{text}"
+        );
+    }
+
+    #[test]
+    fn single_line_taller_than_viewport_renders_without_panicking() {
+        // Pathological case: one line alone needs more rows than the whole
+        // pane. There's no valid layout that shows it in full alongside
+        // anything else -- the important thing is this doesn't panic and
+        // still shows the start of the line, rather than the old
+        // truncate-to-one-row behavior or a blank pane.
+        let mut app = App::new(PathBuf::new(), FakeGraphSource::new()).unwrap();
+        app.file_items.clear();
+        app.current_file = Some(PathBuf::from("test.md"));
+        app.content_lines = vec![plain_line(&"y".repeat(500)), plain_line("after")];
+        app.focus = Focus::Content;
+
+        let text = rendered_text(30, 10, &mut app);
+        assert!(
+            text.contains("yyyyy"),
+            "the start of an oversized line should still render.\nBuffer:\n{text}"
+        );
+    }
+
+    #[test]
+    fn cjk_text_wraps_by_display_width_not_char_count() {
+        // Regression guard for Unicode-width-unaware wrapping: a run of
+        // wide (2-column) CJK characters must wrap well before hitting the
+        // pane's raw character-count width, and every character must still
+        // be present (not silently dropped by a wrap that gets the column
+        // math wrong).
+        let mut app = App::new(PathBuf::new(), FakeGraphSource::new()).unwrap();
+        app.file_items.clear();
+        app.current_file = Some(PathBuf::from("test.md"));
+        app.content_lines = vec![plain_line(&"あ".repeat(40))];
+        app.focus = Focus::Content;
+
+        let text = rendered_text(30, 20, &mut app);
+        assert_eq!(
+            text.matches('あ').count(),
+            40,
+            "every character of the wrapped CJK line should still be rendered.\nBuffer:\n{text}"
+        );
+    }
+
+    #[test]
+    fn cursor_gutter_bar_repeats_on_every_wrapped_row() {
+        // The cursor-block gutter bar is a per-row visual, not per-line: a
+        // wrapped line inside the cursor block should show the bar on every
+        // row it occupies, not just its first, so the block reads as one
+        // continuous highlighted region.
+        let mut app = App::new(PathBuf::new(), FakeGraphSource::new()).unwrap();
+        app.file_items.clear();
+        app.current_file = Some(PathBuf::from("test.md"));
+        app.content_lines = vec![plain_line(&"z".repeat(60))];
+        app.focus = Focus::Content;
+        app.content_cursor = 0;
+
+        let text = rendered_text(40, 20, &mut app);
+        assert!(
+            text.matches('▎').count() >= 2,
+            "the gutter bar should repeat across the wrapped line's rows.\nBuffer:\n{text}"
         );
     }
 }
