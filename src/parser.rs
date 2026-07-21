@@ -76,6 +76,27 @@ fn compute_indent(leading_ws: &str) -> usize {
     indent
 }
 
+/// Strips a fenced code block's own outline-nesting prefix from one of its
+/// captured raw lines, and replaces any remaining tab with a single space.
+///
+/// Logseq indents every continuation line of a block to match that block's
+/// own nesting depth (with tab characters), so a folded code block's raw
+/// lines carry that outline indentation glued onto the code's own -- e.g.
+/// `"\t\t\t    \"category\": ..."` is 3 tabs of outline nesting plus 4
+/// spaces of the JSON's own indentation. Left in, those raw tabs flow
+/// straight through `wrap::wrap_row_ranges` (zero display width, not a
+/// forced break) into a rendered `Span`, and `ratatui::widgets::Paragraph`
+/// writes `StyledGrapheme`s straight into buffer cells without the
+/// control-character filtering `Buffer::set_stringn` has -- so a literal
+/// tab byte reaches the real terminal, which jumps to the next tab stop
+/// instead of advancing one column, desyncing the terminal's actual cursor
+/// from what the app assumes and corrupting the display well past the
+/// pane's own edge.
+fn normalize_code_line(raw: &str, block_leading_ws: &str) -> String {
+    let stripped = raw.strip_prefix(block_leading_ws).unwrap_or(raw);
+    stripped.replace('\t', " ")
+}
+
 pub fn parse_file(content: &str) -> Vec<ParsedLine> {
     let mut lines = Vec::new();
     let mut in_code_block = false;
@@ -92,6 +113,11 @@ pub fn parse_file(content: &str) -> Vec<ParsedLine> {
     // line regardless of how deeply it was actually nested.
     let mut code_block_indent: usize = 0;
     let mut code_block_is_bullet: bool = false;
+    // The opening fence line's own leading whitespace, stripped from every
+    // content line as it's captured (see `normalize_code_line`) -- Logseq
+    // indents a block's continuation lines to match its own outline
+    // nesting (with tabs), which is layout, not part of the code.
+    let mut code_block_leading_ws = String::new();
 
     for (raw_idx, raw) in content.lines().enumerate() {
         if in_code_block {
@@ -108,7 +134,7 @@ pub fn parse_file(content: &str) -> Vec<ParsedLine> {
                 code_buf.clear();
                 in_code_block = false;
             } else {
-                code_buf.push(raw.to_string());
+                code_buf.push(normalize_code_line(raw, &code_block_leading_ws));
             }
             continue;
         }
@@ -140,6 +166,7 @@ pub fn parse_file(content: &str) -> Vec<ParsedLine> {
             code_block_start = raw_idx;
             code_block_indent = indent;
             code_block_is_bullet = fence_is_bullet;
+            code_block_leading_ws = leading_ws.to_string();
             continue;
         }
 
@@ -1004,6 +1031,50 @@ mod tests {
         match &result[0].segments[0] {
             Segment::Code(code) => {
                 assert!(code.contains("fn main"));
+            }
+            _ => panic!("Expected Code segment"),
+        }
+    }
+
+    #[test]
+    fn test_parse_file_code_block_strips_tab_outline_indentation() {
+        // Regression for the corruption reported in the wild: Logseq
+        // indents a block's continuation lines with tabs to match its own
+        // outline nesting -- e.g. "\t\t\t  Extract the following fields"
+        // under a block opened by "\t\t\t- ```". That tab prefix is layout,
+        // not code, and previously survived verbatim into `Segment::Code`.
+        // A raw tab has zero display width in `wrap::wrap_row_ranges`, so
+        // it never forced a wrap, and `ratatui::widgets::Paragraph` writes
+        // `StyledGrapheme`s straight into buffer cells with no
+        // control-character filtering -- so the byte reached the real
+        // terminal, which jumps to the next tab stop instead of advancing
+        // one column, corrupting the display well past the pane's edge.
+        let content = "\t\t\t- ```\n\t\t\t  fn main() {}\n\t\t\t  ```";
+        let result = parse_file(content);
+        assert_eq!(result.len(), 1);
+        match &result[0].segments[0] {
+            Segment::Code(code) => {
+                assert!(
+                    !code.contains('\t'),
+                    "no raw tab byte should survive into the folded code text: {code:?}"
+                );
+                assert!(code.contains("fn main() {}"));
+            }
+            _ => panic!("Expected Code segment"),
+        }
+    }
+
+    #[test]
+    fn test_parse_file_code_block_preserves_own_indentation_past_the_outline_prefix() {
+        // Stripping the block's own outline-nesting tabs must not touch the
+        // code's OWN indentation, written as plain spaces after that prefix
+        // (e.g. nested JSON) -- only the shared tab prefix goes.
+        let content = "\t\t- ```json\n\t\t  {\n\t\t    \"a\": 1\n\t\t  }\n\t\t  ```";
+        let result = parse_file(content);
+        match &result[0].segments[0] {
+            Segment::Code(code) => {
+                assert!(code.contains("  {"));
+                assert!(code.contains("    \"a\": 1"));
             }
             _ => panic!("Expected Code segment"),
         }

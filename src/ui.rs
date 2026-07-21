@@ -770,6 +770,43 @@ mod tests {
     }
 
     #[test]
+    fn tab_indented_code_block_never_renders_a_raw_tab_cell() {
+        // Regression for the corruption reported in the wild: Logseq
+        // indents a block's continuation lines with tabs to match its own
+        // outline nesting, so a fenced code block's raw source lines carry
+        // that prefix (e.g. "\t\t\t  fn main() {}" under a block opened by
+        // "\t\t\t- ```"). `ratatui::widgets::Paragraph` writes
+        // `StyledGrapheme`s straight into buffer cells with no
+        // control-character filtering, so a raw tab reaching a rendered
+        // cell would reach the real terminal too -- where it jumps to the
+        // next tab stop instead of advancing one column, desyncing the
+        // terminal's actual cursor from what the app assumes.
+        let content = "\t\t\t- ```rust\n\t\t\t  fn main() {}\n\t\t\t  ```";
+        let mut app = App::new(PathBuf::new(), FakeGraphSource::new()).unwrap();
+        app.file_items.clear();
+        app.current_file = Some(PathBuf::from("test.md"));
+        app.content_lines = crate::parser::parse_file(content);
+        app.focus = Focus::Content;
+
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let has_control_char = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .any(|c| c.symbol().chars().any(|ch| ch.is_control()));
+
+        assert!(
+            !has_control_char,
+            "a rendered cell contained a raw control character (e.g. a tab) \
+             -- this reaches the real terminal as a cursor-moving control \
+             code, not visible text"
+        );
+    }
+
+    #[test]
     fn cursor_gutter_bar_repeats_on_every_wrapped_row() {
         // The cursor-block gutter bar is a per-row visual, not per-line: a
         // wrapped line inside the cursor block should show the bar on every
