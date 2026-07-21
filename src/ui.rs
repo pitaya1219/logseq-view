@@ -9,7 +9,6 @@ use ratatui::{
     text::{Line, Span},
     widgets::{
         Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
-        Wrap,
     },
     Frame,
 };
@@ -291,7 +290,14 @@ fn draw_content(f: &mut Frame, vm: &ViewModel, area: Rect) {
         })
         .collect();
 
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    // Deliberately not wrapped: every part of the scroll/cursor model
+    // (`content_scroll`, `clamp_content_cursor_scroll`, the scrollbar,
+    // the cursor-block gutter) assumes one `ParsedLine` maps to exactly one
+    // terminal row. Wrapping breaks that invariant — a long line can expand
+    // into several rows and silently eat the fixed row-budget, pushing
+    // later lines that the scroll math still considers "visible" off the
+    // bottom of the pane entirely. Overflowing lines are truncated instead.
+    let paragraph = Paragraph::new(lines);
     f.render_widget(paragraph, inner);
 
     // Scrollbar
@@ -486,6 +492,48 @@ mod tests {
         assert!(
             text.contains("item29"),
             "selected bottom row should be visible, but it was clipped.\nBuffer:\n{text}"
+        );
+    }
+
+    #[test]
+    fn long_line_does_not_clip_later_lines_out_of_view() {
+        // Regression: content used Paragraph::wrap(), which lets one long
+        // ParsedLine expand into several terminal rows. Every other part of
+        // the scroll model (content_scroll, clamp_content_cursor_scroll, the
+        // scrollbar) assumes one ParsedLine == one row, so a wrapped line
+        // could silently eat the fixed row-budget and push later lines —
+        // still considered "visible" by that line-count math — off the
+        // bottom of the pane. Content must truncate long lines instead of
+        // wrapping them, so every line in the visible window gets its row.
+        use crate::parser::ParsedLine;
+        let mut app = App::new(PathBuf::new(), FakeGraphSource::new()).unwrap();
+        app.file_items.clear();
+        app.current_file = Some(PathBuf::from("test.md"));
+        let mut lines: Vec<ParsedLine> = (0..10)
+            .map(|i| ParsedLine {
+                indent: 0,
+                is_bullet: false,
+                task: None,
+                segments: vec![crate::parser::Segment::Plain(format!("line{i}"))],
+                ..Default::default()
+            })
+            .collect();
+        lines[3] = ParsedLine {
+            indent: 0,
+            is_bullet: false,
+            task: None,
+            segments: vec![crate::parser::Segment::Plain("x".repeat(200))],
+            ..Default::default()
+        };
+        app.content_lines = lines;
+        app.focus = Focus::Content;
+        app.content_cursor = 1;
+        app.content_scroll = 1; // window: line1, line2, (long line3), line4..line9
+
+        let text = rendered_text(30, 12, &mut app);
+        assert!(
+            text.contains("line8") && text.contains("line9"),
+            "lines after the wrapped long line should still be visible.\nBuffer:\n{text}"
         );
     }
 }
