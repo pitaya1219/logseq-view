@@ -144,28 +144,28 @@ pub fn parse_file(content: &str) -> Vec<ParsedLine> {
         let leading_ws = &raw[..leading];
         let indent = compute_indent(leading_ws);
 
-        // A fenced code block is itself a Logseq block, so its opening
-        // fence is normally written as "- ```lang" -- strip an optional
-        // bullet prefix BEFORE checking for the fence marker, or a line
-        // like that would fall through unrecognized (fails
-        // `trimmed.starts_with("```")` since it starts with "- " instead)
-        // and get parsed as ordinary bullet text. Left undetected, the
-        // block's own opening never sets `in_code_block`, so a later,
-        // unrelated bare "```" line gets misread as opening a fold that
-        // then swallows everything up to the next bare fence -- merging
-        // unrelated sibling blocks into one garbled `Segment::Code`.
-        let (fence_is_bullet, fence_rest) = if let Some(r) = trimmed.strip_prefix("- ") {
+        let (is_bullet, rest) = if let Some(r) = trimmed.strip_prefix("- ") {
             (true, r)
+        } else if trimmed == "-" {
+            (true, "")
         } else {
             (false, trimmed)
         };
 
-        if fence_rest.starts_with("```") {
-            code_lang = fence_rest.trim_start_matches('`').to_string();
+        // A fenced code block is itself a Logseq block, so its opening
+        // fence is normally written as "- ```lang" -- checking the
+        // bullet-stripped `rest` (rather than `trimmed`) here means a line
+        // like that is still recognized as an opener. Left undetected, the
+        // block's own opening never sets `in_code_block`, so a later,
+        // unrelated bare "```" line gets misread as opening a fold that
+        // then swallows everything up to the next bare fence -- merging
+        // unrelated sibling blocks into one garbled `Segment::Code`.
+        if rest.starts_with("```") {
+            code_lang = rest.trim_start_matches('`').to_string();
             in_code_block = true;
             code_block_start = raw_idx;
             code_block_indent = indent;
-            code_block_is_bullet = fence_is_bullet;
+            code_block_is_bullet = is_bullet;
             code_block_leading_ws = leading_ws.to_string();
             continue;
         }
@@ -181,14 +181,6 @@ pub fn parse_file(content: &str) -> Vec<ParsedLine> {
             });
             continue;
         }
-
-        let (is_bullet, rest) = if let Some(r) = trimmed.strip_prefix("- ") {
-            (true, r)
-        } else if trimmed == "-" {
-            (true, "")
-        } else {
-            (false, trimmed)
-        };
 
         let (task, rest) = extract_task_state(rest);
 
