@@ -85,14 +85,21 @@ pub fn parse_file(content: &str) -> Vec<ParsedLine> {
     // fence was seen; combined with the current `raw_idx` this gives the
     // folded block's `[src_start, src_end)` span.
     let mut code_block_start: usize = 0;
+    // The opening fence line's own indent/bullet-ness, preserved onto the
+    // folded `ParsedLine` so a code block that IS a Logseq block in its own
+    // right (`- ```lang`, the normal way to write one) keeps its place in
+    // the outline instead of always rendering as a top-level, non-bullet
+    // line regardless of how deeply it was actually nested.
+    let mut code_block_indent: usize = 0;
+    let mut code_block_is_bullet: bool = false;
 
     for (raw_idx, raw) in content.lines().enumerate() {
         if in_code_block {
             if raw.trim_start().starts_with("```") {
                 let code = code_buf.join("\n");
                 lines.push(ParsedLine {
-                    indent: 0,
-                    is_bullet: false,
+                    indent: code_block_indent,
+                    is_bullet: code_block_is_bullet,
                     task: None,
                     segments: vec![Segment::Code(format!("```{}\n{}\n```", code_lang, code))],
                     src_start: code_block_start,
@@ -107,17 +114,34 @@ pub fn parse_file(content: &str) -> Vec<ParsedLine> {
         }
 
         let trimmed = raw.trim_start();
-
-        if trimmed.starts_with("```") {
-            code_lang = trimmed.trim_start_matches('`').to_string();
-            in_code_block = true;
-            code_block_start = raw_idx;
-            continue;
-        }
-
         let leading = raw.len() - trimmed.len();
         let leading_ws = &raw[..leading];
         let indent = compute_indent(leading_ws);
+
+        // A fenced code block is itself a Logseq block, so its opening
+        // fence is normally written as "- ```lang" -- strip an optional
+        // bullet prefix BEFORE checking for the fence marker, or a line
+        // like that would fall through unrecognized (fails
+        // `trimmed.starts_with("```")` since it starts with "- " instead)
+        // and get parsed as ordinary bullet text. Left undetected, the
+        // block's own opening never sets `in_code_block`, so a later,
+        // unrelated bare "```" line gets misread as opening a fold that
+        // then swallows everything up to the next bare fence -- merging
+        // unrelated sibling blocks into one garbled `Segment::Code`.
+        let (fence_is_bullet, fence_rest) = if let Some(r) = trimmed.strip_prefix("- ") {
+            (true, r)
+        } else {
+            (false, trimmed)
+        };
+
+        if fence_rest.starts_with("```") {
+            code_lang = fence_rest.trim_start_matches('`').to_string();
+            in_code_block = true;
+            code_block_start = raw_idx;
+            code_block_indent = indent;
+            code_block_is_bullet = fence_is_bullet;
+            continue;
+        }
 
         if trimmed.is_empty() {
             lines.push(ParsedLine {
@@ -173,8 +197,8 @@ pub fn parse_file(content: &str) -> Vec<ParsedLine> {
         let code = code_buf.join("\n");
         let src_end = code_block_start + 1 + code_buf.len();
         lines.push(ParsedLine {
-            indent: 0,
-            is_bullet: false,
+            indent: code_block_indent,
+            is_bullet: code_block_is_bullet,
             task: None,
             segments: vec![Segment::Code(format!("```{}\n{}\n```", code_lang, code))],
             src_start: code_block_start,
@@ -983,6 +1007,76 @@ mod tests {
             }
             _ => panic!("Expected Code segment"),
         }
+    }
+
+    #[test]
+    fn test_parse_file_code_block_opened_by_a_bullet() {
+        // A fenced code block is itself a Logseq block, so it's normally
+        // written as "- ```lang" -- the bullet marker and the fence on the
+        // same line. Before this was recognized as an opener, the fence
+        // check only looked at the raw line (still starting with "- ", not
+        // "```"), so the block's own opening was silently skipped, and
+        // whatever unrelated bare "```" line appeared later in the file
+        // was misread as opening the fold instead -- merging unrelated
+        // sibling blocks into one garbled code segment (see the sibling
+        // test below).
+        let content = "- ```rust\n  fn main() {}\n  ```";
+        let result = parse_file(content);
+        assert_eq!(result.len(), 1);
+        assert!(result[0].is_bullet);
+        match &result[0].segments[0] {
+            Segment::Code(code) => assert!(code.contains("fn main")),
+            _ => panic!("Expected Code segment"),
+        }
+    }
+
+    #[test]
+    fn test_parse_file_code_block_opened_by_a_bullet_preserves_indent() {
+        // The folded ParsedLine must keep the opening bullet's own nesting
+        // depth, not always render as a top-level line regardless of how
+        // deeply the code block was actually nested under its parent.
+        let content = "- parent\n  - ```rust\n    fn main() {}\n    ```";
+        let result = parse_file(content);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[1].indent, 1);
+        assert!(result[1].is_bullet);
+    }
+
+    #[test]
+    fn test_parse_file_unrelated_bullets_after_a_bullet_opened_code_block_are_not_swallowed() {
+        // Regression for the exact corruption reported in the wild: a
+        // sibling bullet ("- v2") and its own bullet-opened code block
+        // following one already-closed, bullet-opened code block must stay
+        // separate blocks -- not get folded together into one giant code
+        // segment because the first block's opener went unrecognized.
+        let content =
+            "- v1\n  - ```\n    line one\n    ```\n- v2\n- ```markdown\n  prompt text\n  ```";
+        let result = parse_file(content);
+
+        let plain_texts: Vec<&str> = result
+            .iter()
+            .filter_map(|l| match l.segments.first() {
+                Some(Segment::Plain(s)) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            plain_texts,
+            vec!["v1", "v2"],
+            "\"v2\" must remain its own bullet, not get absorbed into a code block"
+        );
+
+        let code_blocks: Vec<&str> = result
+            .iter()
+            .filter_map(|l| match l.segments.first() {
+                Some(Segment::Code(s)) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(code_blocks.len(), 2, "each code block stays its own fold");
+        assert!(code_blocks[0].contains("line one"));
+        assert!(!code_blocks[0].contains("v2"));
+        assert!(code_blocks[1].contains("prompt text"));
     }
 
     #[test]
