@@ -15,6 +15,13 @@ pub trait GraphSource {
     /// fs access on the port rather than in `main.rs`, so writing (e.g. the
     /// block-edit flow's splice result) stays testable via `FakeGraphSource`.
     fn write(&self, path: &Path, contents: &str) -> anyhow::Result<()>;
+    /// Recursively lists every markdown file under `root`, applying the same
+    /// dotfile/`bak`/extension filtering as `children`. Unlike `children`
+    /// (one level, driven by the browser's lazy expand/collapse), this walks
+    /// the whole subtree in one call -- for whole-graph operations like the
+    /// browser content filter, which can't rely on which directories happen
+    /// to be expanded in the tree.
+    fn all_files(&self, root: &Path) -> anyhow::Result<Vec<PathBuf>>;
 }
 
 /// URL decode a string, handling percent-encoded characters
@@ -111,6 +118,31 @@ impl GraphSource for WalkdirGraphSource {
         std::fs::write(path, contents)?;
         Ok(())
     }
+
+    fn all_files(&self, root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+        let mut files = Vec::new();
+
+        for entry in walkdir::WalkDir::new(root)
+            .sort_by_file_name()
+            .into_iter()
+            .filter_entry(|e| {
+                if e.depth() == 0 {
+                    return true;
+                }
+                let name = e.file_name().to_string_lossy();
+                !name.starts_with('.') && name != "bak"
+            })
+            .flatten()
+            .filter(|e| e.file_type().is_file())
+        {
+            let path = entry.path().to_path_buf();
+            if path.extension().is_some_and(|e| e == "md") {
+                files.push(path);
+            }
+        }
+
+        Ok(files)
+    }
 }
 
 /// In-memory implementation of GraphSource for testing
@@ -145,6 +177,19 @@ impl FakeGraphSource {
         for (child_path, is_dir, content) in entries {
             if !is_dir {
                 self.files.get_mut().insert(child_path, content.to_string());
+            }
+        }
+    }
+
+    fn collect_all_files(&self, dir: &Path, out: &mut Vec<PathBuf>) {
+        let Some(children) = self.dirs.get(dir) else {
+            return;
+        };
+        for child in children {
+            if self.dirs.contains_key(child) {
+                self.collect_all_files(child, out);
+            } else {
+                out.push(child.clone());
             }
         }
     }
@@ -206,6 +251,12 @@ impl GraphSource for FakeGraphSource {
             .borrow_mut()
             .insert(path.to_path_buf(), contents.to_string());
         Ok(())
+    }
+
+    fn all_files(&self, root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+        let mut files = Vec::new();
+        self.collect_all_files(root, &mut files);
+        Ok(files)
     }
 }
 
@@ -292,5 +343,83 @@ mod tests {
         source.write(&path, "hello").unwrap();
 
         assert_eq!(source.read(&path).unwrap(), "hello");
+    }
+
+    // --- all_files ---
+
+    #[test]
+    fn all_files_recurses_into_nested_dirs() {
+        let root = PathBuf::from("/graph");
+        let pages = root.join("pages");
+        let nested = pages.join("sub");
+
+        let mut source = FakeGraphSource::new();
+        source.add_dir_entries(
+            root.clone(),
+            vec![
+                (pages.clone(), true, ""),
+                (root.join("readme.md"), false, ""),
+            ],
+        );
+        source.add_dir_entries(
+            pages.clone(),
+            vec![
+                (pages.join("apple.md"), false, ""),
+                (nested.clone(), true, ""),
+            ],
+        );
+        source.add_dir_entries(nested.clone(), vec![(nested.join("child.md"), false, "")]);
+
+        let mut files = source.all_files(&root).unwrap();
+        files.sort();
+
+        assert_eq!(
+            files,
+            vec![
+                pages.join("apple.md"),
+                nested.join("child.md"),
+                root.join("readme.md"),
+            ]
+        );
+    }
+
+    #[test]
+    fn all_files_empty_root_returns_empty() {
+        let source = FakeGraphSource::new();
+        let files = source.all_files(&PathBuf::from("/graph")).unwrap();
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn walkdir_all_files_recursively_finds_md_files_skipping_dot_and_bak() {
+        let root =
+            std::env::temp_dir().join(format!("logseq-view-all-files-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("pages/sub")).unwrap();
+        std::fs::create_dir_all(root.join(".hidden")).unwrap();
+        std::fs::create_dir_all(root.join("bak")).unwrap();
+        std::fs::write(root.join("pages/top.md"), "top").unwrap();
+        std::fs::write(root.join("pages/sub/nested.md"), "nested").unwrap();
+        std::fs::write(root.join("pages/notes.txt"), "not markdown").unwrap();
+        std::fs::write(root.join(".hidden/secret.md"), "hidden").unwrap();
+        std::fs::write(root.join("bak/old.md"), "old").unwrap();
+
+        let source = WalkdirGraphSource::new();
+        let mut files: Vec<String> = source
+            .all_files(&root)
+            .unwrap()
+            .into_iter()
+            .map(|p| {
+                p.strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        files.sort();
+
+        std::fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(files, vec!["pages/sub/nested.md", "pages/top.md"]);
     }
 }

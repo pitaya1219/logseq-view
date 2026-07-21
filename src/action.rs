@@ -64,7 +64,9 @@ pub enum Action {
 ///   cursor at render time.)
 /// - Search input mode (`search_input_active`): printable chars->SearchInput,
 ///   Backspace->SearchBackspace, Enter->SearchCommit, Esc->SearchCancel (both focuses)
-/// - Browser `/`->SearchStart; n/N with `browser_has_committed_search`->SearchNext/SearchPrev
+/// - Browser `/`->SearchStart, narrowing `file_items` to title/content
+///   matches (see `App::apply_browser_filter`); no n/N, since the filtered
+///   list is already all matches
 /// - Content `/`->SearchStart, n->SearchNext, N->SearchPrev (always in normal mode)
 /// - Content `e`->EditCurrentPage, `E` (Shift+e)->EditCurrentBlock (always in
 ///   normal mode, i.e. not while `search_input_active`)
@@ -73,7 +75,6 @@ pub fn map_key(
     key: KeyEvent,
     pending_g: bool,
     search_input_active: bool,
-    browser_has_committed_search: bool,
 ) -> (Option<Action>, bool) {
     let KeyEvent {
         code, modifiers, ..
@@ -97,17 +98,9 @@ pub fn map_key(
 
     let action = match focus {
         Focus::Browser => {
-            // `/` always starts browser name search
+            // `/` always starts the browser title/content filter
             if let KeyCode::Char('/') = code {
                 return (Some(Action::SearchStart), false);
-            }
-            // n/N navigate when there is a committed browser search query
-            if browser_has_committed_search {
-                match code {
-                    KeyCode::Char('n') => return (Some(Action::SearchNext), false),
-                    KeyCode::Char('N') => return (Some(Action::SearchPrev), false),
-                    _ => {}
-                }
             }
             match code {
                 KeyCode::Tab => Some(Action::ToggleFocus),
@@ -179,30 +172,28 @@ mod tests {
 
     #[test]
     fn quit_key_q_in_browser() {
-        let (action, pending) =
-            map_key(Focus::Browser, key(KeyCode::Char('q')), false, false, false);
+        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Char('q')), false, false);
         assert_eq!(action, Some(Action::Quit));
         assert!(!pending);
     }
 
     #[test]
     fn quit_key_q_in_content() {
-        let (action, pending) =
-            map_key(Focus::Content, key(KeyCode::Char('q')), false, false, false);
+        let (action, pending) = map_key(Focus::Content, key(KeyCode::Char('q')), false, false);
         assert_eq!(action, Some(Action::Quit));
         assert!(!pending);
     }
 
     #[test]
     fn quit_key_ctrl_c_in_browser() {
-        let (action, pending) = map_key(Focus::Browser, ctrl_key('c'), false, false, false);
+        let (action, pending) = map_key(Focus::Browser, ctrl_key('c'), false, false);
         assert_eq!(action, Some(Action::Quit));
         assert!(!pending);
     }
 
     #[test]
     fn quit_key_ctrl_c_in_content() {
-        let (action, pending) = map_key(Focus::Content, ctrl_key('c'), false, false, false);
+        let (action, pending) = map_key(Focus::Content, ctrl_key('c'), false, false);
         assert_eq!(action, Some(Action::Quit));
         assert!(!pending);
     }
@@ -211,92 +202,84 @@ mod tests {
 
     #[test]
     fn browser_tab_toggles_focus() {
-        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Tab), false, false, false);
+        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Tab), false, false);
         assert_eq!(action, Some(Action::ToggleFocus));
         assert!(!pending);
     }
 
     #[test]
     fn browser_down_maps() {
-        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Down), false, false, false);
+        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Down), false, false);
         assert_eq!(action, Some(Action::BrowserDown));
         assert!(!pending);
     }
 
     #[test]
     fn browser_j_maps() {
-        let (action, pending) =
-            map_key(Focus::Browser, key(KeyCode::Char('j')), false, false, false);
+        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Char('j')), false, false);
         assert_eq!(action, Some(Action::BrowserDown));
         assert!(!pending);
     }
 
     #[test]
     fn browser_up_maps() {
-        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Up), false, false, false);
+        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Up), false, false);
         assert_eq!(action, Some(Action::BrowserUp));
         assert!(!pending);
     }
 
     #[test]
     fn browser_k_maps() {
-        let (action, pending) =
-            map_key(Focus::Browser, key(KeyCode::Char('k')), false, false, false);
+        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Char('k')), false, false);
         assert_eq!(action, Some(Action::BrowserUp));
         assert!(!pending);
     }
 
     #[test]
     fn browser_enter_maps() {
-        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Enter), false, false, false);
+        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Enter), false, false);
         assert_eq!(action, Some(Action::OpenSelected));
         assert!(!pending);
     }
 
     #[test]
     fn browser_l_maps() {
-        let (action, pending) =
-            map_key(Focus::Browser, key(KeyCode::Char('l')), false, false, false);
+        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Char('l')), false, false);
         assert_eq!(action, Some(Action::OpenSelected));
         assert!(!pending);
     }
 
     #[test]
     fn browser_h_maps() {
-        let (action, pending) =
-            map_key(Focus::Browser, key(KeyCode::Char('h')), false, false, false);
+        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Char('h')), false, false);
         assert_eq!(action, Some(Action::CollapseOrParent));
         assert!(!pending);
     }
 
     #[test]
     fn browser_g_sets_pending() {
-        let (action, pending) =
-            map_key(Focus::Browser, key(KeyCode::Char('g')), false, false, false);
+        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Char('g')), false, false);
         assert_eq!(action, None);
         assert!(pending);
     }
 
     #[test]
     fn browser_gg_maps_to_browser_top() {
-        let (action, pending) =
-            map_key(Focus::Browser, key(KeyCode::Char('g')), true, false, false);
+        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Char('g')), true, false);
         assert_eq!(action, Some(Action::BrowserTop));
         assert!(!pending);
     }
 
     #[test]
     fn browser_g_capital_maps_to_bottom() {
-        let (action, pending) =
-            map_key(Focus::Browser, key(KeyCode::Char('G')), false, false, false);
+        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Char('G')), false, false);
         assert_eq!(action, Some(Action::BrowserBottom));
         assert!(!pending);
     }
 
     #[test]
     fn browser_unknown_key_no_action() {
-        let (action, pending) =
-            map_key(Focus::Browser, key(KeyCode::Char('x')), false, false, false);
+        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Char('x')), false, false);
         assert_eq!(action, None);
         assert!(!pending);
     }
@@ -305,89 +288,81 @@ mod tests {
 
     #[test]
     fn content_tab_toggles_focus() {
-        let (action, pending) = map_key(Focus::Content, key(KeyCode::Tab), false, false, false);
+        let (action, pending) = map_key(Focus::Content, key(KeyCode::Tab), false, false);
         assert_eq!(action, Some(Action::ToggleFocus));
         assert!(!pending);
     }
 
     #[test]
     fn content_h_toggles_focus() {
-        let (action, pending) =
-            map_key(Focus::Content, key(KeyCode::Char('h')), false, false, false);
+        let (action, pending) = map_key(Focus::Content, key(KeyCode::Char('h')), false, false);
         assert_eq!(action, Some(Action::ToggleFocus));
         assert!(!pending);
     }
 
     #[test]
     fn content_down_maps() {
-        let (action, pending) = map_key(Focus::Content, key(KeyCode::Down), false, false, false);
+        let (action, pending) = map_key(Focus::Content, key(KeyCode::Down), false, false);
         assert_eq!(action, Some(Action::ContentDown(1)));
         assert!(!pending);
     }
 
     #[test]
     fn content_j_maps() {
-        let (action, pending) =
-            map_key(Focus::Content, key(KeyCode::Char('j')), false, false, false);
+        let (action, pending) = map_key(Focus::Content, key(KeyCode::Char('j')), false, false);
         assert_eq!(action, Some(Action::ContentDown(1)));
         assert!(!pending);
     }
 
     #[test]
     fn content_up_maps() {
-        let (action, pending) = map_key(Focus::Content, key(KeyCode::Up), false, false, false);
+        let (action, pending) = map_key(Focus::Content, key(KeyCode::Up), false, false);
         assert_eq!(action, Some(Action::ContentUp(1)));
         assert!(!pending);
     }
 
     #[test]
     fn content_k_maps() {
-        let (action, pending) =
-            map_key(Focus::Content, key(KeyCode::Char('k')), false, false, false);
+        let (action, pending) = map_key(Focus::Content, key(KeyCode::Char('k')), false, false);
         assert_eq!(action, Some(Action::ContentUp(1)));
         assert!(!pending);
     }
 
     #[test]
     fn content_pagedown_maps() {
-        let (action, pending) =
-            map_key(Focus::Content, key(KeyCode::PageDown), false, false, false);
+        let (action, pending) = map_key(Focus::Content, key(KeyCode::PageDown), false, false);
         assert_eq!(action, Some(Action::ContentDown(20)));
         assert!(!pending);
     }
 
     #[test]
     fn content_pageup_maps() {
-        let (action, pending) = map_key(Focus::Content, key(KeyCode::PageUp), false, false, false);
+        let (action, pending) = map_key(Focus::Content, key(KeyCode::PageUp), false, false);
         assert_eq!(action, Some(Action::ContentUp(20)));
         assert!(!pending);
     }
 
     #[test]
     fn content_g_capital_maps_to_bottom() {
-        let (action, pending) =
-            map_key(Focus::Content, key(KeyCode::Char('G')), false, false, false);
+        let (action, pending) = map_key(Focus::Content, key(KeyCode::Char('G')), false, false);
         assert_eq!(action, Some(Action::ContentBottom));
         assert!(!pending);
     }
 
     #[test]
     fn content_gg_motion() {
-        let (action, pending) =
-            map_key(Focus::Content, key(KeyCode::Char('g')), false, false, false);
+        let (action, pending) = map_key(Focus::Content, key(KeyCode::Char('g')), false, false);
         assert_eq!(action, None);
         assert!(pending);
 
-        let (action, pending) =
-            map_key(Focus::Content, key(KeyCode::Char('g')), true, false, false);
+        let (action, pending) = map_key(Focus::Content, key(KeyCode::Char('g')), true, false);
         assert_eq!(action, Some(Action::ContentTop));
         assert!(!pending);
     }
 
     #[test]
     fn content_e_maps_to_edit_current_page() {
-        let (action, pending) =
-            map_key(Focus::Content, key(KeyCode::Char('e')), false, false, false);
+        let (action, pending) = map_key(Focus::Content, key(KeyCode::Char('e')), false, false);
         assert_eq!(action, Some(Action::EditCurrentPage));
         assert!(!pending);
     }
@@ -395,8 +370,7 @@ mod tests {
     #[test]
     fn content_e_in_search_input_mode_is_input_not_edit() {
         // While typing a search query, `e` must be inserted, not trigger edit.
-        let (action, pending) =
-            map_key(Focus::Content, key(KeyCode::Char('e')), false, true, false);
+        let (action, pending) = map_key(Focus::Content, key(KeyCode::Char('e')), false, true);
         assert_eq!(action, Some(Action::SearchInput('e')));
         assert!(!pending);
     }
@@ -404,16 +378,14 @@ mod tests {
     #[test]
     fn browser_e_no_action() {
         // `e` is only bound in Content focus.
-        let (action, pending) =
-            map_key(Focus::Browser, key(KeyCode::Char('e')), false, false, false);
+        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Char('e')), false, false);
         assert_eq!(action, None);
         assert!(!pending);
     }
 
     #[test]
     fn content_shift_e_maps_to_edit_current_block() {
-        let (action, pending) =
-            map_key(Focus::Content, key(KeyCode::Char('E')), false, false, false);
+        let (action, pending) = map_key(Focus::Content, key(KeyCode::Char('E')), false, false);
         assert_eq!(action, Some(Action::EditCurrentBlock));
         assert!(!pending);
     }
@@ -421,8 +393,7 @@ mod tests {
     #[test]
     fn content_shift_e_in_search_input_mode_is_input_not_edit() {
         // While typing a search query, `E` must be inserted, not trigger a block edit.
-        let (action, pending) =
-            map_key(Focus::Content, key(KeyCode::Char('E')), false, true, false);
+        let (action, pending) = map_key(Focus::Content, key(KeyCode::Char('E')), false, true);
         assert_eq!(action, Some(Action::SearchInput('E')));
         assert!(!pending);
     }
@@ -430,16 +401,14 @@ mod tests {
     #[test]
     fn browser_shift_e_no_action() {
         // `E` is only bound in Content focus.
-        let (action, pending) =
-            map_key(Focus::Browser, key(KeyCode::Char('E')), false, false, false);
+        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Char('E')), false, false);
         assert_eq!(action, None);
         assert!(!pending);
     }
 
     #[test]
     fn content_unknown_key_no_action() {
-        let (action, pending) =
-            map_key(Focus::Content, key(KeyCode::Char('x')), false, false, false);
+        let (action, pending) = map_key(Focus::Content, key(KeyCode::Char('x')), false, false);
         assert_eq!(action, None);
         assert!(!pending);
     }
@@ -448,33 +417,29 @@ mod tests {
 
     #[test]
     fn content_slash_starts_search() {
-        let (action, pending) =
-            map_key(Focus::Content, key(KeyCode::Char('/')), false, false, false);
+        let (action, pending) = map_key(Focus::Content, key(KeyCode::Char('/')), false, false);
         assert_eq!(action, Some(Action::SearchStart));
         assert!(!pending);
     }
 
     #[test]
     fn content_n_search_next() {
-        let (action, pending) =
-            map_key(Focus::Content, key(KeyCode::Char('n')), false, false, false);
+        let (action, pending) = map_key(Focus::Content, key(KeyCode::Char('n')), false, false);
         assert_eq!(action, Some(Action::SearchNext));
         assert!(!pending);
     }
 
     #[test]
     fn content_shift_n_search_prev() {
-        let (action, pending) =
-            map_key(Focus::Content, key(KeyCode::Char('N')), false, false, false);
+        let (action, pending) = map_key(Focus::Content, key(KeyCode::Char('N')), false, false);
         assert_eq!(action, Some(Action::SearchPrev));
         assert!(!pending);
     }
 
     #[test]
     fn content_n_in_browser_no_action() {
-        // In Browser without a committed search, n should do nothing
-        let (action, pending) =
-            map_key(Focus::Browser, key(KeyCode::Char('n')), false, false, false);
+        // n is only bound in Content focus; Browser's filter has no jump.
+        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Char('n')), false, false);
         assert_eq!(action, None);
         assert!(!pending);
     }
@@ -483,38 +448,35 @@ mod tests {
 
     #[test]
     fn search_mode_enter_commits() {
-        let (action, pending) = map_key(Focus::Content, key(KeyCode::Enter), false, true, false);
+        let (action, pending) = map_key(Focus::Content, key(KeyCode::Enter), false, true);
         assert_eq!(action, Some(Action::SearchCommit));
         assert!(!pending);
     }
 
     #[test]
     fn search_mode_esc_cancels() {
-        let (action, pending) = map_key(Focus::Content, key(KeyCode::Esc), false, true, false);
+        let (action, pending) = map_key(Focus::Content, key(KeyCode::Esc), false, true);
         assert_eq!(action, Some(Action::SearchCancel));
         assert!(!pending);
     }
 
     #[test]
     fn search_mode_backspace() {
-        let (action, pending) =
-            map_key(Focus::Content, key(KeyCode::Backspace), false, true, false);
+        let (action, pending) = map_key(Focus::Content, key(KeyCode::Backspace), false, true);
         assert_eq!(action, Some(Action::SearchBackspace));
         assert!(!pending);
     }
 
     #[test]
     fn search_mode_char_input() {
-        let (action, pending) =
-            map_key(Focus::Content, key(KeyCode::Char('a')), false, true, false);
+        let (action, pending) = map_key(Focus::Content, key(KeyCode::Char('a')), false, true);
         assert_eq!(action, Some(Action::SearchInput('a')));
         assert!(!pending);
     }
 
     #[test]
     fn search_mode_space_input() {
-        let (action, pending) =
-            map_key(Focus::Content, key(KeyCode::Char(' ')), false, true, false);
+        let (action, pending) = map_key(Focus::Content, key(KeyCode::Char(' ')), false, true);
         assert_eq!(action, Some(Action::SearchInput(' ')));
         assert!(!pending);
     }
@@ -522,8 +484,7 @@ mod tests {
     #[test]
     fn search_mode_n_is_input() {
         // In search mode, 'n' should be treated as input, not SearchNext
-        let (action, pending) =
-            map_key(Focus::Content, key(KeyCode::Char('n')), false, true, false);
+        let (action, pending) = map_key(Focus::Content, key(KeyCode::Char('n')), false, true);
         assert_eq!(action, Some(Action::SearchInput('n')));
         assert!(!pending);
     }
@@ -531,92 +492,70 @@ mod tests {
     #[test]
     fn search_mode_q_is_input_not_quit() {
         // While typing a query, `q` must be inserted, not quit the app.
-        let (action, pending) =
-            map_key(Focus::Content, key(KeyCode::Char('q')), false, true, false);
+        let (action, pending) = map_key(Focus::Content, key(KeyCode::Char('q')), false, true);
         assert_eq!(action, Some(Action::SearchInput('q')));
         assert!(!pending);
     }
 
     #[test]
     fn search_mode_ctrl_c_still_quits() {
-        let (action, pending) = map_key(Focus::Content, ctrl_key('c'), false, true, false);
+        let (action, pending) = map_key(Focus::Content, ctrl_key('c'), false, true);
         assert_eq!(action, Some(Action::Quit));
         assert!(!pending);
     }
 
-    // --- Browser search key mappings ---
+    // --- Browser filter key mappings ---
 
     #[test]
-    fn browser_slash_starts_search() {
-        let (action, pending) =
-            map_key(Focus::Browser, key(KeyCode::Char('/')), false, false, false);
+    fn browser_slash_starts_filter() {
+        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Char('/')), false, false);
         assert_eq!(action, Some(Action::SearchStart));
         assert!(!pending);
     }
 
     #[test]
-    fn browser_search_input_mode_char() {
-        let (action, pending) =
-            map_key(Focus::Browser, key(KeyCode::Char('t')), false, true, false);
+    fn browser_filter_input_mode_char() {
+        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Char('t')), false, true);
         assert_eq!(action, Some(Action::SearchInput('t')));
         assert!(!pending);
     }
 
     #[test]
-    fn browser_search_input_mode_backspace() {
-        let (action, pending) =
-            map_key(Focus::Browser, key(KeyCode::Backspace), false, true, false);
+    fn browser_filter_input_mode_backspace() {
+        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Backspace), false, true);
         assert_eq!(action, Some(Action::SearchBackspace));
         assert!(!pending);
     }
 
     #[test]
-    fn browser_search_input_mode_enter() {
-        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Enter), false, true, false);
+    fn browser_filter_input_mode_enter() {
+        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Enter), false, true);
         assert_eq!(action, Some(Action::SearchCommit));
         assert!(!pending);
     }
 
     #[test]
-    fn browser_search_input_mode_esc() {
-        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Esc), false, true, false);
+    fn browser_filter_input_mode_esc() {
+        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Esc), false, true);
         assert_eq!(action, Some(Action::SearchCancel));
         assert!(!pending);
     }
 
     #[test]
-    fn browser_search_input_mode_q_is_input() {
-        let (action, pending) =
-            map_key(Focus::Browser, key(KeyCode::Char('q')), false, true, false);
+    fn browser_filter_input_mode_q_is_input() {
+        let (action, pending) = map_key(Focus::Browser, key(KeyCode::Char('q')), false, true);
         assert_eq!(action, Some(Action::SearchInput('q')));
         assert!(!pending);
     }
 
     #[test]
-    fn browser_committed_search_n() {
-        let (action, _pending) =
-            map_key(Focus::Browser, key(KeyCode::Char('n')), false, false, true);
-        assert_eq!(action, Some(Action::SearchNext));
-    }
-
-    #[test]
-    fn browser_committed_search_n_uppercase() {
-        let (action, _pending) =
-            map_key(Focus::Browser, key(KeyCode::Char('N')), false, false, true);
-        assert_eq!(action, Some(Action::SearchPrev));
-    }
-
-    #[test]
-    fn browser_no_committed_search_n_no_action() {
-        let (action, _pending) =
-            map_key(Focus::Browser, key(KeyCode::Char('n')), false, false, false);
+    fn browser_n_uppercase_n_are_unbound() {
+        // Browser's `/` filters the list in place, so there is no "next
+        // match" to jump to -- n/N are simply unbound in Browser focus.
+        let (action, _pending) = map_key(Focus::Browser, key(KeyCode::Char('n')), false, false);
         assert_eq!(action, None);
-    }
 
-    #[test]
-    fn browser_no_committed_search_n_uppercase_no_action() {
-        let (action, _pending) =
-            map_key(Focus::Browser, key(KeyCode::Char('N')), false, false, false);
+        let (action, _pending) = map_key(Focus::Browser, key(KeyCode::Char('N')), false, false);
         assert_eq!(action, None);
     }
 }

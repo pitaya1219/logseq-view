@@ -83,17 +83,10 @@ fn event_loop(
         if let Event::Key(key) = event::read()? {
             let search_input_active = match app.focus {
                 Focus::Content => app.content_search_active,
-                Focus::Browser => app.browser_search_active,
+                Focus::Browser => app.browser_filter_active,
             };
-            let browser_has_committed = app.browser_has_committed_search();
 
-            let (action, next_pending_g) = map_key(
-                app.focus,
-                key,
-                pending_g,
-                search_input_active,
-                browser_has_committed,
-            );
+            let (action, next_pending_g) = map_key(app.focus, key, pending_g, search_input_active);
             pending_g = next_pending_g;
 
             if let Some(action) = action {

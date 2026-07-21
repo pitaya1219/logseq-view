@@ -1,6 +1,6 @@
 use crate::action::Action;
 use crate::parser::{line_to_plain_text, parse_file, ParsedLine};
-use crate::source::{Entry, GraphSource};
+use crate::source::{url_decode, Entry, GraphSource};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
@@ -75,10 +75,18 @@ pub struct App<S: GraphSource> {
     pub content_search_saved_scroll: usize,
     pub content_search_saved_cursor: usize,
 
-    // browser search state
-    pub browser_search_active: bool,
-    pub browser_search_query: String,
-    pub browser_search_saved_selected: usize,
+    // browser filter state: `/` narrows `file_items` down to pages whose
+    // title or content matches the query, rather than jumping the selection
+    // (see `apply_browser_filter`).
+    pub browser_filter_active: bool,
+    pub browser_filter_query: String,
+    pub browser_filter_saved_items: Vec<FileItem>,
+    pub browser_filter_saved_selected: usize,
+    // Lowercased (path, "title\ncontent") pairs snapshotted once per filter
+    // session by `browser_filter_start`, so each keystroke re-filters this
+    // in-memory list instead of re-walking the graph and re-reading every
+    // file's content from disk.
+    browser_filter_candidates: Vec<(PathBuf, String)>,
 
     // GraphSource instance
     source: S,
@@ -100,9 +108,11 @@ impl<S: GraphSource> App<S> {
             content_search_query: String::new(),
             content_search_saved_scroll: 0,
             content_search_saved_cursor: 0,
-            browser_search_active: false,
-            browser_search_query: String::new(),
-            browser_search_saved_selected: 0,
+            browser_filter_active: false,
+            browser_filter_query: String::new(),
+            browser_filter_saved_items: Vec::new(),
+            browser_filter_saved_selected: 0,
+            browser_filter_candidates: Vec::new(),
             source,
         };
         app.build_file_tree()?;
@@ -309,53 +319,58 @@ impl<S: GraphSource> App<S> {
                 self.browser_bottom();
                 Ok(false)
             }
-            // Search actions are routed by current focus
+            // Search/filter actions are routed by current focus. In Content
+            // this is an in-page jump search; in Browser it's a whole-graph
+            // title/content filter (see `apply_browser_filter`) -- both
+            // share the same key mapping and Action variants.
             Action::SearchStart => {
                 match self.focus {
                     Focus::Content => self.content_search_start(),
-                    Focus::Browser => self.browser_search_start(),
+                    Focus::Browser => self.browser_filter_start(),
                 }
                 Ok(false)
             }
             Action::SearchInput(c) => {
                 match self.focus {
                     Focus::Content => self.content_search_input(c),
-                    Focus::Browser => self.browser_search_input(c),
+                    Focus::Browser => self.browser_filter_input(c),
                 }
                 Ok(false)
             }
             Action::SearchBackspace => {
                 match self.focus {
                     Focus::Content => self.content_search_backspace(),
-                    Focus::Browser => self.browser_search_backspace(),
+                    Focus::Browser => self.browser_filter_backspace(),
                 }
                 Ok(false)
             }
             Action::SearchCommit => {
                 match self.focus {
                     Focus::Content => self.content_search_commit(),
-                    Focus::Browser => self.browser_search_commit(),
+                    Focus::Browser => self.browser_filter_commit(),
                 }
                 Ok(false)
             }
             Action::SearchCancel => {
                 match self.focus {
                     Focus::Content => self.content_search_cancel(),
-                    Focus::Browser => self.browser_search_cancel(),
+                    Focus::Browser => self.browser_filter_cancel(),
                 }
                 Ok(false)
             }
+            // SearchNext/SearchPrev only apply to the Content in-page jump
+            // search: Browser's `/` is a filter, not a jump, so there is no
+            // "next match" to move to -- the (already narrowed) list is
+            // navigated with the normal j/k/up/down actions instead.
             Action::SearchNext => {
-                match self.focus {
-                    Focus::Content => self.content_search_next(),
-                    Focus::Browser => self.browser_search_next(),
+                if self.focus == Focus::Content {
+                    self.content_search_next();
                 }
                 Ok(false)
             }
             Action::SearchPrev => {
-                match self.focus {
-                    Focus::Content => self.content_search_prev(),
-                    Focus::Browser => self.browser_search_prev(),
+                if self.focus == Focus::Content {
+                    self.content_search_prev();
                 }
                 Ok(false)
             }
@@ -670,125 +685,117 @@ impl<S: GraphSource> App<S> {
             .map(|pos| pos + 1)
     }
 
-    // --- Browser search methods ---
+    // --- Browser filter methods ---
+    //
+    // Unlike the old name-jump search, `/` in the browser narrows
+    // `file_items` down to only the pages whose title or content matches
+    // the query (see `apply_browser_filter`), searched across the whole
+    // graph via `GraphSource::all_files` rather than just the lazily
+    // expanded tree. `browser_filter_saved_items` holds the last unfiltered
+    // tree so backspacing to empty / cancelling can restore it.
 
-    /// Start a new browser name search: save current selection, clear query, enter input mode
-    pub(crate) fn browser_search_start(&mut self) {
-        self.browser_search_saved_selected = self.browser_selected;
-        self.browser_search_query.clear();
-        self.browser_search_active = true;
-    }
-
-    /// Append a character to the browser search query and find the next match
-    pub(crate) fn browser_search_input(&mut self, c: char) {
-        self.browser_search_query.push(c);
-        self.browser_find_next_match(true);
-    }
-
-    /// Remove the last character from the browser search query and find the next match
-    pub(crate) fn browser_search_backspace(&mut self) {
-        self.browser_search_query.pop();
-        self.browser_find_next_match(true);
-    }
-
-    /// Commit the browser search: exit input mode, keep current selection
-    pub(crate) fn browser_search_commit(&mut self) {
-        self.browser_search_active = false;
-    }
-
-    /// Cancel the browser search: exit input mode, restore saved selection
-    pub(crate) fn browser_search_cancel(&mut self) {
-        self.browser_search_query.clear();
-        self.browser_search_active = false;
-        self.browser_selected = self.browser_search_saved_selected;
-    }
-
-    /// Find the next browser match (for n key after commit)
-    pub(crate) fn browser_search_next(&mut self) {
-        self.browser_find_next_match(false);
-    }
-
-    /// Find the previous browser match (for N key after commit)
-    pub(crate) fn browser_search_prev(&mut self) {
-        self.browser_find_prev_match(false);
-    }
-
-    /// Find the next matching file/dir item, wrapping around
-    fn browser_find_next_match(&mut self, include_current: bool) {
-        if self.browser_search_query.is_empty() {
-            return;
+    /// Start a new browser filter: snapshot the current (unfiltered) tree
+    /// and selection, clear the query, enter input mode. If a filter from a
+    /// previous session is still applied (query non-empty), the tree is
+    /// restored to its unfiltered state first so the snapshot is always the
+    /// true full tree, not a previously-filtered view -- and the selection
+    /// resets to 0, since the old index referred to a position in that
+    /// discarded filtered list, not the restored tree.
+    /// Also snapshots the searchable title/content text for every page in
+    /// the graph once (`browser_filter_candidates`), so each keystroke
+    /// re-filters this in-memory list instead of re-walking the graph and
+    /// re-reading every file from disk.
+    pub(crate) fn browser_filter_start(&mut self) {
+        if !self.browser_filter_query.is_empty() {
+            self.file_items = self.browser_filter_saved_items.clone();
+            self.browser_selected = 0;
         }
+        self.browser_filter_saved_items = self.file_items.clone();
+        self.browser_filter_saved_selected = self.browser_selected;
+        self.browser_filter_query.clear();
+        self.browser_filter_active = true;
+        self.browser_filter_candidates = self.build_filter_candidates();
+    }
 
-        let query_lower = self.browser_search_query.to_lowercase();
-        let start_idx = if include_current {
-            self.browser_selected
+    /// Append a character to the filter query and re-apply it.
+    pub(crate) fn browser_filter_input(&mut self, c: char) {
+        self.browser_filter_query.push(c);
+        self.apply_browser_filter();
+    }
+
+    /// Remove the last character from the filter query. Restores the
+    /// unfiltered tree once the query is empty; otherwise re-applies.
+    pub(crate) fn browser_filter_backspace(&mut self) {
+        self.browser_filter_query.pop();
+        if self.browser_filter_query.is_empty() {
+            self.file_items = self.browser_filter_saved_items.clone();
         } else {
-            self.browser_selected + 1
+            self.apply_browser_filter();
+        }
+        self.browser_selected = 0;
+        self.browser_offset = 0;
+    }
+
+    /// Commit the filter: exit input mode, keep the filtered tree and query.
+    pub(crate) fn browser_filter_commit(&mut self) {
+        self.browser_filter_active = false;
+    }
+
+    /// Cancel the filter: exit input mode, clear the query, restore the
+    /// unfiltered tree and the selection from before filtering started.
+    pub(crate) fn browser_filter_cancel(&mut self) {
+        self.browser_filter_query.clear();
+        self.browser_filter_active = false;
+        self.file_items = self.browser_filter_saved_items.clone();
+        self.browser_selected = self.browser_filter_saved_selected;
+    }
+
+    /// Snapshots every page under `graph_path` (via `GraphSource::all_files`)
+    /// as a lowercased "title\ncontent" haystack, computed once per filter
+    /// session rather than on every keystroke.
+    /// NOTE: a page whose directory listing or content can't be read (e.g.
+    /// deleted or permission-denied while the browser is open) is silently
+    /// dropped from the candidates rather than surfaced as an error -- it
+    /// just won't match, same as any other non-matching page, since a single
+    /// unreadable file shouldn't make the whole filter unusable.
+    fn build_filter_candidates(&self) -> Vec<(PathBuf, String)> {
+        let Ok(files) = self.source.all_files(&self.graph_path) else {
+            return Vec::new();
         };
 
-        let num_items = self.file_items.len();
-        if num_items == 0 {
-            return;
-        }
-
-        for i in start_idx..num_items {
-            if self.item_matches(&self.file_items[i], &query_lower) {
-                self.browser_selected = i;
-                return;
-            }
-        }
-
-        for i in 0..start_idx {
-            if self.item_matches(&self.file_items[i], &query_lower) {
-                self.browser_selected = i;
-                return;
-            }
-        }
+        files
+            .into_iter()
+            .map(|path| {
+                let title = path
+                    .file_stem()
+                    .map(|s| url_decode(&s.to_string_lossy()).to_lowercase())
+                    .unwrap_or_default();
+                let content = self.source.read(&path).unwrap_or_default().to_lowercase();
+                let haystack = format!("{title}\n{content}");
+                (path, haystack)
+            })
+            .collect()
     }
 
-    /// Find the previous matching file/dir item, wrapping around
-    fn browser_find_prev_match(&mut self, include_current: bool) {
-        if self.browser_search_query.is_empty() {
-            return;
-        }
+    /// Recomputes `file_items` as the flat, alphabetically sorted list of
+    /// every `browser_filter_candidates` entry whose title or raw content
+    /// contains the filter query, case-insensitively. The candidates
+    /// themselves are snapshotted once by `browser_filter_start`; this just
+    /// re-filters that in-memory list on each keystroke.
+    fn apply_browser_filter(&mut self) {
+        let query_lower = self.browser_filter_query.to_lowercase();
 
-        let query_lower = self.browser_search_query.to_lowercase();
-        let start_idx = if include_current {
-            self.browser_selected
-        } else {
-            self.browser_selected.saturating_sub(1)
-        };
+        let mut matched: Vec<FileItem> = self
+            .browser_filter_candidates
+            .iter()
+            .filter(|(_, haystack)| haystack.contains(&query_lower))
+            .map(|(path, _)| make_filtered_file_item(path.clone()))
+            .collect();
+        matched.sort_by(|a, b| a.name.cmp(&b.name));
 
-        let num_items = self.file_items.len();
-        if num_items == 0 {
-            return;
-        }
-
-        let mut idx = start_idx;
-        loop {
-            if idx < num_items && self.item_matches(&self.file_items[idx], &query_lower) {
-                self.browser_selected = idx;
-                return;
-            }
-
-            if idx == 0 {
-                idx = num_items;
-            }
-            idx = idx.saturating_sub(1);
-
-            if idx == start_idx && !include_current {
-                break;
-            }
-        }
-    }
-
-    fn item_matches(&self, item: &FileItem, query_lower: &str) -> bool {
-        item.name.to_lowercase().contains(query_lower)
-    }
-
-    /// Returns true if there is a committed browser search query (non-empty, not in input mode)
-    pub fn browser_has_committed_search(&self) -> bool {
-        !self.browser_search_query.is_empty() && !self.browser_search_active
+        self.file_items = matched;
+        self.browser_selected = 0;
+        self.browser_offset = 0;
     }
 
     // --- Scroll clamping ---
@@ -877,6 +884,23 @@ fn make_file_item_from_entry(entry: Entry, depth: usize) -> FileItem {
         name: entry.name,
         depth,
         is_dir: entry.is_dir,
+        is_expanded: false,
+    }
+}
+
+/// Builds a flat (depth 0) `FileItem` for a browser filter result. Filter
+/// results are a search result list, not a tree, so there is no parent
+/// directory to nest under -- see `apply_browser_filter`.
+fn make_filtered_file_item(path: PathBuf) -> FileItem {
+    let name = path
+        .file_stem()
+        .map(|s| url_decode(&s.to_string_lossy()))
+        .unwrap_or_default();
+    FileItem {
+        path,
+        name,
+        depth: 0,
+        is_dir: false,
         is_expanded: false,
     }
 }
@@ -2624,190 +2648,228 @@ mod tests {
         assert_eq!(result, Some(1));
     }
 
-    // --- Browser search tests ---
+    // --- Browser filter tests ---
 
-    fn make_app_with_files() -> App<FakeGraphSource> {
-        let mut app = make_app();
-        app.file_items = vec![
-            FileItem {
-                path: PathBuf::from("a"),
-                name: "apple".to_string(),
-                depth: 0,
-                is_dir: false,
-                is_expanded: false,
-            },
-            FileItem {
-                path: PathBuf::from("b"),
-                name: "banana".to_string(),
-                depth: 0,
-                is_dir: false,
-                is_expanded: false,
-            },
-            FileItem {
-                path: PathBuf::from("c"),
-                name: "cherry".to_string(),
-                depth: 0,
-                is_dir: false,
-                is_expanded: false,
-            },
-            FileItem {
-                path: PathBuf::from("d"),
-                name: "date".to_string(),
-                depth: 0,
-                is_dir: false,
-                is_expanded: false,
-            },
-        ];
+    /// A small graph with a nested page, so filtering exercises
+    /// `GraphSource::all_files`'s recursion rather than just the top-level
+    /// (unexpanded) `file_items` tree built by `App::new`.
+    fn make_app_with_graph() -> App<FakeGraphSource> {
+        let root = PathBuf::from("/graph");
+        let pages = root.join("pages");
+        let sub = pages.join("sub");
+
+        let mut source = FakeGraphSource::new();
+        source.add_dir_entries(root.clone(), vec![(pages.clone(), true, "")]);
+        source.add_dir_entries(
+            pages.clone(),
+            vec![
+                (pages.join("apple.md"), false, "an apple a day"),
+                (pages.join("banana.md"), false, "yellow fruit"),
+                (sub.clone(), true, ""),
+            ],
+        );
+        source.add_dir_entries(
+            sub.clone(),
+            vec![(sub.join("notes.md"), false, "mentions apple pie recipe")],
+        );
+
+        let mut app = App::new(root, source).unwrap();
         app.focus = Focus::Browser;
         app
     }
 
     #[test]
-    fn browser_search_start_saves_selection_and_enters_input_mode() {
-        let mut app = make_app_with_files();
-        app.browser_selected = 2;
+    fn browser_filter_start_saves_tree_and_selection_and_enters_input_mode() {
+        let mut app = make_app_with_graph();
+        app.browser_selected = 0;
 
         app.update(Action::SearchStart).unwrap();
 
-        assert!(app.browser_search_active);
-        assert_eq!(app.browser_search_saved_selected, 2);
-        assert!(app.browser_search_query.is_empty());
+        assert!(app.browser_filter_active);
+        assert!(app.browser_filter_query.is_empty());
+        assert_eq!(app.browser_filter_saved_selected, 0);
+        assert_eq!(app.browser_filter_saved_items.len(), 1); // just "pages", unexpanded
     }
 
     #[test]
-    fn browser_search_input_appends_char_and_finds_match() {
-        let mut app = make_app_with_files();
+    fn browser_filter_matches_title() {
+        let mut app = make_app_with_graph();
         app.update(Action::SearchStart).unwrap();
 
         app.update(Action::SearchInput('a')).unwrap();
+        app.update(Action::SearchInput('p')).unwrap();
+        app.update(Action::SearchInput('p')).unwrap();
 
-        assert_eq!(app.browser_search_query, "a");
-        assert_eq!(app.browser_selected, 0); // "apple" contains 'a'
+        // "apple" matches by title; "notes" matches because its content
+        // mentions "apple"; "banana" matches neither.
+        let names: Vec<&str> = app.file_items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["apple", "notes"]);
+        assert!(app.file_items.iter().all(|i| !i.is_dir && i.depth == 0));
     }
 
     #[test]
-    fn browser_search_input_case_insensitive() {
-        let mut app = make_app_with_files();
+    fn browser_filter_matches_content_only() {
+        let mut app = make_app_with_graph();
         app.update(Action::SearchStart).unwrap();
 
-        app.update(Action::SearchInput('A')).unwrap();
+        for c in "recipe".chars() {
+            app.update(Action::SearchInput(c)).unwrap();
+        }
 
-        assert_eq!(app.browser_selected, 0); // "apple" matches 'A' case-insensitively
+        let names: Vec<&str> = app.file_items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["notes"]);
     }
 
     #[test]
-    fn browser_search_backspace_removes_char_and_updates() {
-        let mut app = make_app_with_files();
+    fn browser_filter_is_case_insensitive() {
+        let mut app = make_app_with_graph();
+        app.update(Action::SearchStart).unwrap();
+
+        for c in "APPLE".chars() {
+            app.update(Action::SearchInput(c)).unwrap();
+        }
+
+        let names: Vec<&str> = app.file_items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["apple", "notes"]);
+    }
+
+    #[test]
+    fn browser_filter_no_match_hides_everything() {
+        let mut app = make_app_with_graph();
+        app.update(Action::SearchStart).unwrap();
+
+        for c in "zzz".chars() {
+            app.update(Action::SearchInput(c)).unwrap();
+        }
+
+        assert!(app.file_items.is_empty());
+    }
+
+    #[test]
+    fn browser_filter_backspace_to_empty_restores_unfiltered_tree() {
+        let mut app = make_app_with_graph();
         app.update(Action::SearchStart).unwrap();
         app.update(Action::SearchInput('a')).unwrap();
-        app.update(Action::SearchInput('l')).unwrap();
-
-        assert_eq!(app.browser_search_query, "al");
+        assert_ne!(app.file_items.len(), 1);
 
         app.update(Action::SearchBackspace).unwrap();
 
-        assert_eq!(app.browser_search_query, "a");
+        assert_eq!(app.file_items.len(), 1);
+        assert_eq!(app.file_items[0].name, "pages");
     }
 
     #[test]
-    fn browser_search_commit_exits_input_mode_keeps_query() {
-        let mut app = make_app_with_files();
+    fn browser_filter_commit_keeps_filtered_tree_and_query() {
+        let mut app = make_app_with_graph();
         app.update(Action::SearchStart).unwrap();
-        app.update(Action::SearchInput('a')).unwrap();
+        for c in "apple".chars() {
+            app.update(Action::SearchInput(c)).unwrap();
+        }
 
         app.update(Action::SearchCommit).unwrap();
 
-        assert!(!app.browser_search_active);
-        assert_eq!(app.browser_search_query, "a");
+        assert!(!app.browser_filter_active);
+        assert_eq!(app.browser_filter_query, "apple");
+        assert_eq!(app.file_items.len(), 2); // "apple" and "notes" still filtered in
     }
 
     #[test]
-    fn browser_search_cancel_restores_selection() {
-        let mut app = make_app_with_files();
-        app.browser_selected = 2;
+    fn browser_filter_cancel_restores_tree_and_selection() {
+        let mut app = make_app_with_graph();
+        app.browser_selected = 0;
         app.update(Action::SearchStart).unwrap();
-        app.update(Action::SearchInput('b')).unwrap(); // Moves to "banana" at index 1
+        app.update(Action::SearchInput('a')).unwrap();
 
         app.update(Action::SearchCancel).unwrap();
 
-        assert!(!app.browser_search_active);
-        assert!(app.browser_search_query.is_empty());
-        assert_eq!(app.browser_selected, 2); // Restored to original
-    }
-
-    #[test]
-    fn browser_search_next_finds_next_match() {
-        let mut app = make_app_with_files();
-        app.update(Action::SearchStart).unwrap();
-        app.update(Action::SearchInput('a')).unwrap(); // Moves to "apple" at index 0
+        assert!(!app.browser_filter_active);
+        assert!(app.browser_filter_query.is_empty());
+        assert_eq!(app.file_items.len(), 1);
+        assert_eq!(app.file_items[0].name, "pages");
         assert_eq!(app.browser_selected, 0);
-        app.update(Action::SearchCommit).unwrap();
-
-        // Matches for 'a': 0 "apple", 1 "banana", 3 "date"
-        // Next after 0 should be 1
-        app.update(Action::SearchNext).unwrap();
-
-        assert_eq!(app.browser_selected, 1);
     }
 
     #[test]
-    fn browser_search_prev_finds_previous_match() {
-        let mut app = make_app_with_files();
-        app.browser_selected = 3; // Start at "date"
+    fn browser_filter_restarting_after_commit_resets_from_full_tree() {
+        let mut app = make_app_with_graph();
         app.update(Action::SearchStart).unwrap();
-        app.update(Action::SearchInput('a')).unwrap(); // "date" contains 'a', stays at 3
+        for c in "apple".chars() {
+            app.update(Action::SearchInput(c)).unwrap();
+        }
         app.update(Action::SearchCommit).unwrap();
+        assert_eq!(app.file_items.len(), 2);
 
-        // Matches for 'a': 0 "apple", 1 "banana", 3 "date"
-        // Prev from 3 → 2 (no match) → 1 (match)
-        app.update(Action::SearchPrev).unwrap();
+        // Restarting the filter must snapshot the *original* tree, not the
+        // already-filtered one, so cancelling now restores all the way back.
+        app.update(Action::SearchStart).unwrap();
+        app.update(Action::SearchCancel).unwrap();
 
-        assert_eq!(app.browser_selected, 1);
+        assert_eq!(app.file_items.len(), 1);
+        assert_eq!(app.file_items[0].name, "pages");
     }
 
     #[test]
-    fn browser_search_wraps_around() {
-        let mut app = make_app_with_files();
+    fn browser_filter_restarting_after_navigating_resets_selection() {
+        // Regression test: restarting a filter after navigating within the
+        // previously-committed filtered list must not carry the old
+        // filtered-list index over as the restore point for the new
+        // session -- that index refers to a position in a list that no
+        // longer exists once the tree is restored.
+        let mut app = make_app_with_graph();
+        app.update(Action::SearchStart).unwrap();
+        for c in "apple".chars() {
+            app.update(Action::SearchInput(c)).unwrap();
+        }
+        app.update(Action::SearchCommit).unwrap();
+        assert_eq!(app.file_items.len(), 2); // ["apple", "notes"]
+
+        app.update(Action::BrowserDown).unwrap();
+        assert_eq!(app.browser_selected, 1);
+
+        app.update(Action::SearchStart).unwrap();
+        app.update(Action::SearchCancel).unwrap();
+
+        assert_eq!(app.file_items.len(), 1);
+        assert!(app.browser_selected < app.file_items.len());
+        assert_eq!(app.browser_selected, 0);
+    }
+
+    #[test]
+    fn browser_filter_open_selected_loads_matched_file() {
+        let mut app = make_app_with_graph();
+        app.update(Action::SearchStart).unwrap();
+        for c in "banana".chars() {
+            app.update(Action::SearchInput(c)).unwrap();
+        }
+        app.update(Action::SearchCommit).unwrap();
+        assert_eq!(app.file_items.len(), 1);
+        assert_eq!(app.file_items[0].name, "banana");
+
+        app.update(Action::OpenSelected).unwrap();
+
+        assert_eq!(app.focus, Focus::Content);
+        assert_eq!(
+            app.current_file.as_deref(),
+            Some(PathBuf::from("/graph/pages/banana.md").as_path())
+        );
+    }
+
+    #[test]
+    fn browser_search_next_prev_are_noop_in_browser_focus() {
+        // Browser's `/` is a filter, not a jump search, so n/N-driven
+        // SearchNext/SearchPrev have nothing to do there.
+        let mut app = make_app_with_graph();
         app.update(Action::SearchStart).unwrap();
         app.update(Action::SearchInput('a')).unwrap();
-
-        assert_eq!(app.browser_selected, 0);
         app.update(Action::SearchCommit).unwrap();
+        let items_before: Vec<PathBuf> = app.file_items.iter().map(|i| i.path.clone()).collect();
+        let selected_before = app.browser_selected;
 
         app.update(Action::SearchNext).unwrap();
-        assert_eq!(app.browser_selected, 1); // "banana"
+        app.update(Action::SearchPrev).unwrap();
 
-        app.update(Action::SearchNext).unwrap();
-        assert_eq!(app.browser_selected, 3); // "date"
-
-        app.update(Action::SearchNext).unwrap();
-        assert_eq!(app.browser_selected, 0); // wraps to "apple"
-    }
-
-    #[test]
-    fn browser_has_committed_search_returns_true() {
-        let mut app = make_app();
-        app.browser_search_query = "test".to_string();
-        app.browser_search_active = false;
-
-        assert!(app.browser_has_committed_search());
-    }
-
-    #[test]
-    fn browser_has_committed_search_returns_false_when_input_active() {
-        let mut app = make_app();
-        app.browser_search_query = "test".to_string();
-        app.browser_search_active = true;
-
-        assert!(!app.browser_has_committed_search());
-    }
-
-    #[test]
-    fn browser_has_committed_search_returns_false_when_empty() {
-        let mut app = make_app();
-        app.browser_search_query.clear();
-        app.browser_search_active = false;
-
-        assert!(!app.browser_has_committed_search());
+        let items_after: Vec<PathBuf> = app.file_items.iter().map(|i| i.path.clone()).collect();
+        assert_eq!(items_before, items_after);
+        assert_eq!(app.browser_selected, selected_before);
     }
 }

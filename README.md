@@ -28,9 +28,9 @@ lqview
 | `gg` | Top of content (Content) / top of current directory scope (Browser) |
 | `G` | Bottom of content (Content) / bottom of current directory scope (Browser) |
 | `PgUp`/`PgDn` | Page scroll |
-| `/` | In-page search with match count (Content) / file name search (Browser) |
-| `n` / `N` | Next / previous search match |
-| `Esc` | Cancel search |
+| `/` | In-page search with match count (Content) / filter files by title or content (Browser) |
+| `n` / `N` | Next / previous search match (Content only) |
+| `Esc` | Cancel search / filter |
 | `Tab` | Switch focus (browser ↔ content) |
 | `q` / `Ctrl+c` | Quit |
 
@@ -58,7 +58,7 @@ lqview
 │                │ • TODO task                                        │
 │                │ • DONE completed task                              │
 └────────────────┴───────────────────────────────────────────────────┘
- BROWSER ↑↓/jk navigate  Enter open  Tab switch pane  q quit
+ BROWSER ↑↓/jk navigate  Enter open  / filter  Tab switch pane  q quit
 ```
 
 ## License

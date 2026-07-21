@@ -329,6 +329,8 @@ fn draw_statusbar(f: &mut Frame, vm: &ViewModel, area: Rect) {
                 Span::raw(" navigate  "),
                 Span::styled("Enter", Style::default().fg(Color::Yellow)),
                 Span::raw(" open  "),
+                Span::styled("/", Style::default().fg(Color::Yellow)),
+                Span::raw(" filter  "),
                 Span::styled("Tab", Style::default().fg(Color::Yellow)),
                 Span::raw(" switch pane  "),
                 Span::styled("q", Style::default().fg(Color::Red)),
@@ -361,15 +363,15 @@ fn draw_statusbar(f: &mut Frame, vm: &ViewModel, area: Rect) {
         }
     };
 
-    // Browser search prompt
+    // Browser filter prompt
     if vm.focus == Focus::Browser
-        && (vm.browser_search_active || !vm.browser_search_query.is_empty())
+        && (vm.browser_filter_active || !vm.browser_filter_query.is_empty())
     {
-        let search_span = if vm.browser_search_active {
-            let display_text = if vm.browser_search_query.is_empty() {
+        let filter_span = if vm.browser_filter_active {
+            let display_text = if vm.browser_filter_query.is_empty() {
                 "/".to_string()
             } else {
-                format!("/{}", vm.browser_search_query)
+                format!("/{}", vm.browser_filter_query)
             };
             Span::styled(
                 display_text,
@@ -380,13 +382,13 @@ fn draw_statusbar(f: &mut Frame, vm: &ViewModel, area: Rect) {
             )
         } else {
             Span::styled(
-                format!("/{}", vm.browser_search_query),
+                format!("/{}", vm.browser_filter_query),
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             )
         };
-        hints.insert(0, search_span);
+        hints.insert(0, filter_span);
         hints.insert(1, Span::raw(" "));
     }
 

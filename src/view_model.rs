@@ -69,9 +69,9 @@ pub struct ViewModel {
     // Content search state (for status bar and highlight)
     pub content_search_active: bool,
     pub content_search_query: String,
-    // Browser search state (for status bar)
-    pub browser_search_active: bool,
-    pub browser_search_query: String,
+    // Browser filter state (for status bar)
+    pub browser_filter_active: bool,
+    pub browser_filter_query: String,
 }
 
 /// Build a ViewModel from the App state and visible heights.
@@ -89,8 +89,8 @@ pub fn build_view_model<S: GraphSource>(
         focus: app.focus,
         content_search_active: app.content_search_active,
         content_search_query: app.content_search_query.clone(),
-        browser_search_active: app.browser_search_active,
-        browser_search_query: app.browser_search_query.clone(),
+        browser_filter_active: app.browser_filter_active,
+        browser_filter_query: app.browser_filter_query.clone(),
     }
 }
 
