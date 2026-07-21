@@ -130,9 +130,14 @@ pub fn draw<S: GraphSource>(f: &mut Frame, app: &mut crate::app::App<S>) {
         .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(f.area());
 
+    let browser_collapsed = app.browser_collapsed;
     let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
+        .constraints(if browser_collapsed {
+            [Constraint::Length(0), Constraint::Percentage(100)]
+        } else {
+            [Constraint::Percentage(25), Constraint::Percentage(75)]
+        })
         .split(chunks[0]);
 
     // Both panes are drawn inside a `Borders::ALL` block, so the actual number of
@@ -156,7 +161,9 @@ pub fn draw<S: GraphSource>(f: &mut Frame, app: &mut crate::app::App<S>) {
         content_visible_width,
     );
 
-    draw_browser(f, &vm, main_chunks[0]);
+    if !browser_collapsed {
+        draw_browser(f, &vm, main_chunks[0]);
+    }
     draw_content(f, &vm, main_chunks[1]);
     draw_statusbar(f, &vm, chunks[1]);
 }
@@ -333,6 +340,12 @@ fn draw_content(f: &mut Frame, vm: &ViewModel, area: Rect) {
 }
 
 fn draw_statusbar(f: &mut Frame, vm: &ViewModel, area: Rect) {
+    let toggle_browser_hint = if vm.browser_collapsed {
+        "show files"
+    } else {
+        "hide files"
+    };
+
     let mut hints = match vm.focus {
         Focus::Browser => {
             vec![
@@ -352,6 +365,8 @@ fn draw_statusbar(f: &mut Frame, vm: &ViewModel, area: Rect) {
                 Span::raw(" filter  "),
                 Span::styled("Tab", Style::default().fg(Color::Yellow)),
                 Span::raw(" switch pane  "),
+                Span::styled("^B", Style::default().fg(Color::Yellow)),
+                Span::raw(format!(" {toggle_browser_hint}  ")),
                 Span::styled("q", Style::default().fg(Color::Red)),
                 Span::raw(" quit"),
             ]
@@ -376,6 +391,8 @@ fn draw_statusbar(f: &mut Frame, vm: &ViewModel, area: Rect) {
                 Span::raw(" edit block  "),
                 Span::styled("Tab", Style::default().fg(Color::Yellow)),
                 Span::raw(" switch pane  "),
+                Span::styled("^B", Style::default().fg(Color::Yellow)),
+                Span::raw(format!(" {toggle_browser_hint}  ")),
                 Span::styled("q", Style::default().fg(Color::Red)),
                 Span::raw(" quit"),
             ]
@@ -654,6 +671,50 @@ mod tests {
             text.matches('あ').count(),
             40,
             "every character of the wrapped CJK line should still be rendered.\nBuffer:\n{text}"
+        );
+    }
+
+    #[test]
+    fn collapsed_browser_pane_is_not_rendered() {
+        let mut app = App::new(PathBuf::new(), FakeGraphSource::new()).unwrap();
+        app.file_items = vec![FileItem {
+            path: PathBuf::from("visible-file.md"),
+            name: "visible-file.md".to_string(),
+            depth: 0,
+            is_dir: false,
+            is_expanded: false,
+        }];
+        app.browser_collapsed = true;
+
+        let text = rendered_text(50, 10, &mut app);
+        assert!(
+            !text.contains("Files") && !text.contains("visible-file"),
+            "a collapsed browser pane must not be drawn.\nBuffer:\n{text}"
+        );
+    }
+
+    #[test]
+    fn collapsed_browser_gives_content_the_full_width() {
+        // A 40-column line doesn't fit the content pane's usual ~34-column
+        // share of a 50-column terminal (would wrap to 2 rows -- 2 gutter
+        // bars), but does fit the ~47 columns content gets once the browser
+        // pane stops claiming its 25% share (1 row -- 1 gutter bar). Counting
+        // the cursor-block gutter bar (see `cursor_gutter_bar_repeats_on_every_wrapped_row`
+        // above) is a robust way to observe the row count without depending
+        // on exactly where ratatui's buffer wraps the text.
+        let mut app = App::new(PathBuf::new(), FakeGraphSource::new()).unwrap();
+        app.file_items.clear();
+        app.current_file = Some(PathBuf::from("test.md"));
+        app.content_lines = vec![plain_line(&"x".repeat(40))];
+        app.focus = Focus::Content;
+        app.content_cursor = 0;
+        app.browser_collapsed = true;
+
+        let text = rendered_text(50, 10, &mut app);
+        assert_eq!(
+            text.matches('▎').count(),
+            1,
+            "content should use the full pane width once the browser is collapsed, fitting the line on one row.\nBuffer:\n{text}"
         );
     }
 

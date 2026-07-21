@@ -74,6 +74,7 @@ pub struct ViewModel {
     pub browser: BrowserView,
     pub content: ContentView,
     pub focus: Focus,
+    pub browser_collapsed: bool,
     // Content search state (for status bar and highlight)
     pub content_search_active: bool,
     pub content_search_query: String,
@@ -100,6 +101,7 @@ pub fn build_view_model<S: GraphSource>(
         browser: browser_view,
         content: content_view,
         focus: app.focus,
+        browser_collapsed: app.browser_collapsed,
         content_search_active: app.content_search_active,
         content_search_query: app.content_search_query.clone(),
         browser_filter_active: app.browser_filter_active,

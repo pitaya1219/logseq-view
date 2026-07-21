@@ -29,6 +29,7 @@ fn map_key_search(code: KeyCode, modifiers: KeyModifiers) -> (Option<Action>, bo
 pub enum Action {
     Quit,
     ToggleFocus,
+    ToggleBrowserCollapsed,
     BrowserUp,
     BrowserDown,
     BrowserTop,
@@ -54,6 +55,9 @@ pub enum Action {
 /// Returns (Option<Action>, next_pending_g)
 ///
 /// - `q` and `Ctrl-C` -> Quit (except in search-input mode, where `q` is inserted; Ctrl-C still quits)
+/// - `Ctrl-B` -> ToggleBrowserCollapsed, in any focus (not honored during
+///   search-input mode, where it is inserted like any other letter --
+///   mirrors how `q` is only special outside search input)
 /// - Browser: Tab->ToggleFocus, Down/j->BrowserDown, Up/k->BrowserUp,
 ///   Enter/l->OpenSelected, h->CollapseOrParent, G->BrowserBottom, gg->BrowserTop
 /// - Content: Tab/h->ToggleFocus, Down/j->ContentDown(1), Up/k->ContentUp(1),
@@ -93,6 +97,11 @@ pub fn map_key(
     if let KeyCode::Char('c') = code {
         if modifiers.contains(KeyModifiers::CONTROL) {
             return (Some(Action::Quit), false);
+        }
+    }
+    if let KeyCode::Char('b') = code {
+        if modifiers.contains(KeyModifiers::CONTROL) {
+            return (Some(Action::ToggleBrowserCollapsed), false);
         }
     }
 
@@ -195,6 +204,30 @@ mod tests {
     fn quit_key_ctrl_c_in_content() {
         let (action, pending) = map_key(Focus::Content, ctrl_key('c'), false, false);
         assert_eq!(action, Some(Action::Quit));
+        assert!(!pending);
+    }
+
+    // --- Toggle browser collapsed (works in any focus) ---
+
+    #[test]
+    fn ctrl_b_toggles_browser_collapsed_in_browser() {
+        let (action, pending) = map_key(Focus::Browser, ctrl_key('b'), false, false);
+        assert_eq!(action, Some(Action::ToggleBrowserCollapsed));
+        assert!(!pending);
+    }
+
+    #[test]
+    fn ctrl_b_toggles_browser_collapsed_in_content() {
+        let (action, pending) = map_key(Focus::Content, ctrl_key('b'), false, false);
+        assert_eq!(action, Some(Action::ToggleBrowserCollapsed));
+        assert!(!pending);
+    }
+
+    #[test]
+    fn ctrl_b_in_search_input_mode_is_input_not_toggle() {
+        // While typing a query, `Ctrl-B` must be inserted, not toggle the pane.
+        let (action, pending) = map_key(Focus::Content, ctrl_key('b'), false, true);
+        assert_eq!(action, Some(Action::SearchInput('b')));
         assert!(!pending);
     }
 

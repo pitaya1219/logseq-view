@@ -32,6 +32,7 @@ lqview
 | `n` / `N` | Next / previous search match (Content only) |
 | `Esc` | Cancel search / filter |
 | `Tab` | Switch focus (browser ↔ content) |
+| `Ctrl+b` | Show/hide the file browser pane |
 | `q` / `Ctrl+c` | Quit |
 
 ## Logseq syntax rendering
@@ -58,7 +59,7 @@ lqview
 │                │ • TODO task                                        │
 │                │ • DONE completed task                              │
 └────────────────┴───────────────────────────────────────────────────┘
- BROWSER ↑↓/jk navigate  Enter open  / filter  Tab switch pane  q quit
+ BROWSER ↑↓/jk navigate  Enter open  / filter  Tab switch pane  ^B hide files  q quit
 ```
 
 ## License

@@ -59,6 +59,9 @@ pub struct App<S: GraphSource> {
     pub file_items: Vec<FileItem>,
     pub browser_selected: usize,
     pub browser_offset: usize,
+    /// When `true`, the browser pane is hidden and the content pane takes
+    /// the full width (see `ui::draw`). Toggled by `Action::ToggleBrowserCollapsed`.
+    pub browser_collapsed: bool,
 
     // content
     pub current_file: Option<PathBuf>,
@@ -100,6 +103,7 @@ impl<S: GraphSource> App<S> {
             file_items: Vec::new(),
             browser_selected: 0,
             browser_offset: 0,
+            browser_collapsed: false,
             current_file: None,
             content_lines: Vec::new(),
             content_scroll: 0,
@@ -277,6 +281,10 @@ impl<S: GraphSource> App<S> {
             Action::Quit => Ok(true),
             Action::ToggleFocus => {
                 self.toggle_focus();
+                Ok(false)
+            }
+            Action::ToggleBrowserCollapsed => {
+                self.toggle_browser_collapsed();
                 Ok(false)
             }
             Action::BrowserUp => {
@@ -905,6 +913,16 @@ impl<S: GraphSource> App<S> {
             Focus::Browser => Focus::Content,
             Focus::Content => Focus::Browser,
         };
+    }
+
+    /// Hides/shows the browser pane. Collapsing it while the browser is
+    /// focused also moves focus to content, since a hidden pane can't stay
+    /// the one receiving Browser-focus key mappings.
+    pub(crate) fn toggle_browser_collapsed(&mut self) {
+        self.browser_collapsed = !self.browser_collapsed;
+        if self.browser_collapsed && self.focus == Focus::Browser {
+            self.focus = Focus::Content;
+        }
     }
 }
 
@@ -1749,6 +1767,39 @@ mod tests {
         let should_quit = app.update(Action::ToggleFocus).unwrap().quit;
         assert!(!should_quit);
         assert_eq!(app.focus, Focus::Browser);
+    }
+
+    #[test]
+    fn update_toggle_browser_collapsed_hides_and_restores_the_pane() {
+        let mut app = make_app();
+        assert!(!app.browser_collapsed);
+
+        let should_quit = app.update(Action::ToggleBrowserCollapsed).unwrap().quit;
+        assert!(!should_quit);
+        assert!(app.browser_collapsed);
+
+        app.update(Action::ToggleBrowserCollapsed).unwrap();
+        assert!(!app.browser_collapsed);
+    }
+
+    #[test]
+    fn update_toggle_browser_collapsed_moves_focus_off_browser() {
+        let mut app = make_app();
+        app.focus = Focus::Browser;
+        app.update(Action::ToggleBrowserCollapsed).unwrap();
+        assert_eq!(
+            app.focus,
+            Focus::Content,
+            "collapsing the browser pane must not leave focus on a hidden pane"
+        );
+    }
+
+    #[test]
+    fn update_toggle_browser_collapsed_leaves_content_focus_untouched() {
+        let mut app = make_app();
+        app.focus = Focus::Content;
+        app.update(Action::ToggleBrowserCollapsed).unwrap();
+        assert_eq!(app.focus, Focus::Content);
     }
 
     #[test]
