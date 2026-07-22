@@ -1,4 +1,23 @@
 # Changelog
+## [0.4.0] - 2026-07-22
+
+### Bug Fixes
+
+- Stop wrapping long lines so scroll math stays correct
+- Wrap long lines instead of truncating them
+- Treat embedded newlines as hard row breaks
+- Recognize a fenced code block opened by its own bullet
+- Strip a code block's own outline-nesting tabs
+
+### Features
+
+- Filter files by title or content with /
+- Make the file browser pane collapsible
+
+### Refactor
+
+- Stop computing the bullet-prefix strip twice per line
+
 ## [0.3.0] - 2026-07-06
 
 ### Bug Fixes
